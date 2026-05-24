@@ -261,57 +261,244 @@ async function initDB() {
 
 async function seed() {
   try {
-    const hasClymet = await db.select().from(customers).where(eq(customers.name, 'Clymet Logistics')).limit(1);
-    if (hasClymet.length > 0) {
-      console.log("Database already has rich entries.");
+    let csvPath = path.join(process.cwd(), "synohub_fleet_data.csv");
+    if (!fs.existsSync(csvPath)) {
+      csvPath = path.join(process.cwd(), "user_import.csv");
+    }
+    if (!fs.existsSync(csvPath)) {
+      console.log("No synohub_fleet_data.csv or user_import.csv found, skipping seed.");
       return;
     }
 
-    console.log("Seeding rich initial data with multiple test branches and matches...");
-    
+    console.log(`Found CSV dataset at ${path.basename(csvPath)}. Truncating tables and seeding entire custom dataset...`);
     try {
       await pool.execute("TRUNCATE TABLE customers");
       await pool.execute("TRUNCATE TABLE registrations");
       await pool.execute("TRUNCATE TABLE services");
     } catch (truncateErr) {
-      console.log("Truncate ignored, executing direct insert");
+      console.log("Truncate error ignored (continuing with database loading):", (truncateErr as Error).message);
     }
+
+    const csvContent = fs.readFileSync(csvPath, "utf8");
+    const lines = csvContent.split(/\r?\n/);
     
-    await db.insert(customers).values([
-      { name: 'Al Noor Transport', contactName: 'Ahmed Ali', phone: '+971501112222', email: 'ahmed@alnoor.ae', region: 'Dubai', implementationType: 'LOCATOR', vehicleCount: 24 },
-      { name: 'Gulf Cargo LLC', contactName: 'Saeed Mansoor', phone: '+971502223333', email: 'saeed@gulfcargo.ae', region: 'Abu Dhabi', implementationType: 'LOCATOR+ASATEEL', vehicleCount: 18 },
-      { name: 'Emirates Freight', contactName: 'Mohammed Hassan', phone: '+971503334444', email: 'mohammed@emiratesfreight.ae', region: 'Sharjah', implementationType: 'SECUREPATH', vehicleCount: 35 },
+    // Custom CSV parser to handle quotes and commas properly
+    function parseCSVLine(line: string): string[] {
+      const result: string[] = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          result.push(current);
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      result.push(current);
+      return result;
+    }
+
+    const customerMap = new Map<string, {
+      name: string;
+      contactName: string;
+      phone: string;
+      email: string;
+      region: string;
+      implementationType: string;
+      vehicleCount: number;
+    }>();
+
+    const registrationValues: any[] = [];
+    const serviceValues: any[] = [];
+
+    // Skip the headers row-0 and start parsing from i=1
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
       
-      // Seeding similar named clients for the chatbot lookup/clarification feature
-      { name: 'Clymet Logistics', contactName: 'Vishnu', phone: '+971501445390', email: 'vishnu@clymet.com', region: 'DIP / kizad', implementationType: 'Locator + Securepath', vehicleCount: 12 },
-      { name: 'Clymet Abu Dhabi', contactName: 'Vishnu', phone: '+971501445390', email: 'vishnu.ad@clymet.com', region: 'Abu Dhabi', implementationType: 'LOCATOR', vehicleCount: 8 },
-      { name: 'Clymet Sharjah Co', contactName: 'Fajr', phone: '+971505553331', email: 'fajr@clymet.com', region: 'Sharjah', implementationType: 'SECUREPATH', vehicleCount: 15 },
+      const cols = parseCSVLine(line);
+      if (cols.length < 13) continue;
+
+      const recordId = cols[0].replace(/["']/g, '').trim();
+      const type = cols[1].replace(/["']/g, '').trim();
+      const customerOrEntity = cols[2].replace(/["']/g, '').trim();
+      const contactPerson = cols[3].replace(/["']/g, '').trim();
+      const phone = cols[4].replace(/["']/g, '').trim();
+      const email = cols[5].replace(/["']/g, '').trim();
+      const region = cols[6].replace(/["']/g, '').trim();
+      const status = cols[7].replace(/["']/g, '').trim();
+      const quantity = parseInt(cols[8].replace(/["']/g, '').trim()) || 0;
+      const valueOrAmount = cols[9].replace(/["']/g, '').trim();
+      const salesPersonOrAssignee = cols[10].replace(/["']/g, '').trim();
+      const implementationOrDescription = cols[11].replace(/["']/g, '').trim();
       
-      // Seeding INSPIRENTALS branches
-      { name: 'INSPIRENTALS MIDDLE EAST REAL ESTATE LEASE AND MANAGEMENT SERVICES LLC', contactName: 'Ms. Aan', phone: '+971505987534', email: 'aan@inspirentals.ae', region: 'Abu Dhabi', implementationType: 'LOCATOR', vehicleCount: 9 },
-      { name: 'Inspirentals Dubai Branch', contactName: 'Ms. Aan', phone: '+971505987534', email: 'dubai@inspirentals.ae', region: 'Dubai', implementationType: 'LOCATOR', vehicleCount: 4 },
-    ]);
+      let createdAtValue = new Date();
+      if (cols[12]) {
+        const cleanDateStr = cols[12].replace(/["']/g, '').trim();
+        const d = new Date(cleanDateStr);
+        if (!isNaN(d.getTime())) {
+          createdAtValue = d;
+        }
+      }
 
-    await db.insert(registrations).values([
-      { customerName: 'Khalid Logistics', contactName: 'Khalid', region: 'Dubai', status: 'New Lead', salesPerson: 'Nishad', newQty: 10 },
-      { customerName: 'RAK Trading', contactName: 'Sultan', region: 'Ras Al Khaimah', status: 'Won', salesPerson: 'Vishal', newQty: 5 },
-      { customerName: 'Clymet Logistics', contactName: 'Vishnu', region: 'DIP / kizad', status: 'New Lead', salesPerson: 'Nishad', newQty: 2, comment: '1 device removal (24843 Test Temp on Trailer) and 1 BLE Temp sensor' },
-      { customerName: 'INSPIRENTALS MIDDLE EAST REAL ESTATE LEASE AND MANAGEMENT SERVICES LLC', contactName: 'Ms. Aan', region: 'Abu Dhabi', status: 'New Lead', salesPerson: 'Nishad', newQty: 1, comment: 'MG 50974 GPS Device + Temp Sensor' }
-    ]);
+      // Track uniquely in customer map
+      const cleanCustomerName = customerOrEntity;
+      if (cleanCustomerName) {
+        if (!customerMap.has(cleanCustomerName)) {
+          customerMap.set(cleanCustomerName, {
+            name: cleanCustomerName,
+            contactName: contactPerson,
+            phone: phone,
+            email: email,
+            region: region,
+            implementationType: type === "LeadRegistration" ? implementationOrDescription : "Service Ticket",
+            vehicleCount: quantity
+          });
+        } else {
+          const current = customerMap.get(cleanCustomerName)!;
+          current.vehicleCount += quantity;
+          if (contactPerson) current.contactName = contactPerson;
+          if (phone) current.phone = phone;
+          if (email) current.email = email;
+          if (region) current.region = region;
+        }
+      }
 
-    await db.insert(services).values([
-      { ticketId: 'TKT-A1B2C3', customerName: 'Al Noor Transport', description: 'GPS device not updating location in Asateel', status: 'Ongoing', assignee: 'Athul', amount: '150' },
-      { ticketId: 'TKT-C7D8E9', customerName: 'Clymet Logistics', description: 'BLE Temperature integration setup', status: 'Delivered', assignee: 'Feros', amount: '350', payment: 'Cash' }
-    ]);
+      if (type === "LeadRegistration") {
+        registrationValues.push({
+          customerName: customerOrEntity,
+          contactName: contactPerson,
+          phone: phone,
+          email: email,
+          region: region,
+          status: status || 'New Lead',
+          implementationType: implementationOrDescription,
+          salesPerson: salesPersonOrAssignee,
+          projectValue: valueOrAmount,
+          newQty: quantity,
+          createdAt: createdAtValue
+        });
+      } else if (type === "ServiceTicket") {
+        serviceValues.push({
+          ticketId: recordId,
+          customerName: customerOrEntity,
+          description: implementationOrDescription,
+          status: status || 'New',
+          quantity: quantity,
+          amount: valueOrAmount,
+          assignee: salesPersonOrAssignee,
+          createdAt: createdAtValue
+        });
+      }
+    }
 
-    console.log("Seeding complete with rich test data.");
+    // Insert in batches of 50 records
+    if (registrationValues.length > 0) {
+      console.log(`Seeding ${registrationValues.length} registrations...`);
+      for (let i = 0; i < registrationValues.length; i += 50) {
+        const chunk = registrationValues.slice(i, i + 50);
+        await db.insert(registrations).values(chunk);
+      }
+    }
+
+    if (serviceValues.length > 0) {
+      console.log(`Seeding ${serviceValues.length} services...`);
+      for (let i = 0; i < serviceValues.length; i += 50) {
+        const chunk = serviceValues.slice(i, i + 50);
+        await db.insert(services).values(chunk);
+      }
+    }
+
+    if (customerMap.size > 0) {
+      const customersToInsert = Array.from(customerMap.values());
+      console.log(`Seeding ${customersToInsert.length} summarized customers...`);
+      for (let i = 0; i < customersToInsert.length; i += 50) {
+        const chunk = customersToInsert.slice(i, i + 50);
+        await db.insert(customers).values(chunk);
+      }
+    }
+
+    console.log("Database initialized and loaded with raw CSV dataset successfully.");
   } catch (e) {
-    console.error("Seeding failed (DB might not be ready):", (e as Error).message);
+    console.error("CSV Seeding failed:", (e as Error).message);
   }
 }
 
-// Helper to handle AI record saving via trigger tags
+// Helper to handle AI record saving/updating/deletion via trigger tags
 async function handleAIRecordSave(reply: string): Promise<{ reply: string; savedRecord?: any }> {
+  // 1. Process [[DELETE_RECORD:...]]
+  const deleteMatch = reply.match(/\[{1,2}DELETE_RECORD:(.*?)\]{1,2}/s);
+  if (deleteMatch) {
+    try {
+      let rawJson = deleteMatch[1].trim();
+      const firstBrace = rawJson.indexOf("{");
+      const lastBrace = rawJson.lastIndexOf("}");
+      if (firstBrace !== -1 && lastBrace !== -1) {
+        rawJson = rawJson.substring(firstBrace, lastBrace + 1);
+      }
+      const record = JSON.parse(rawJson);
+      const id = parseInt(record.id);
+      console.log(`[AI Auto-Delete] Detected record: ${record.type}, ID: ${id}`);
+      if (record.type === "registration") {
+        await db.delete(registrations).where(eq(registrations.id, id));
+        return {
+          reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(CRM: Registration record #${id} deleted successfully.)`
+        };
+      } else if (record.type === "service") {
+        await db.delete(services).where(eq(services.id, id));
+        return {
+          reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(CRM: Service ticket record #${id} deleted successfully.)`
+        };
+      } else if (record.type === "customer") {
+        await db.delete(customers).where(eq(customers.id, id));
+        return {
+          reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(CRM: Customer account record #${id} deleted successfully.)`
+        };
+      }
+    } catch (e) {
+      console.error("AI Auto-Delete failed:", e);
+    }
+  }
+
+  // 2. Process [[UPDATE_RECORD:...]]
+  const updateMatch = reply.match(/\[{1,2}UPDATE_RECORD:(.*?)\]{1,2}/s);
+  if (updateMatch) {
+    try {
+      let rawJson = updateMatch[1].trim();
+      const firstBrace = rawJson.indexOf("{");
+      const lastBrace = rawJson.lastIndexOf("}");
+      if (firstBrace !== -1 && lastBrace !== -1) {
+        rawJson = rawJson.substring(firstBrace, lastBrace + 1);
+      }
+      const record = JSON.parse(rawJson);
+      const id = parseInt(record.id);
+      console.log(`[AI Auto-Update] Detected record: ${record.type}, ID: ${id}`);
+      if (record.type === "registration") {
+        await db.update(registrations).set(record.data).where(eq(registrations.id, id));
+        return {
+          reply: reply.replace(updateMatch[0], "").trim() + `\n\n(CRM: Registration #${id} updated successfully.)`
+        };
+      } else if (record.type === "service") {
+        await db.update(services).set(record.data).where(eq(services.id, id));
+        return {
+          reply: reply.replace(updateMatch[0], "").trim() + `\n\n(CRM: Service ticket #${id} updated successfully.)`
+        };
+      } else if (record.type === "customer") {
+        await db.update(customers).set(record.data).where(eq(customers.id, id));
+        return {
+          reply: reply.replace(updateMatch[0], "").trim() + `\n\n(CRM: Customer account #${id} updated successfully.)`
+        };
+      }
+    } catch (e) {
+      console.error("AI Auto-Update failed:", e);
+    }
+  }
+
+  // 3. Process [[SAVE_RECORD:...]]
   const saveMatch = reply.match(/\[{1,2}SAVE_RECORD:(.*?)\]{1,2}/s);
   if (!saveMatch) return { reply };
 
@@ -388,7 +575,7 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
       };
     } else if (record.type === "service") {
       const ticketId = record.ticketId || ('TKT-' + crypto.randomBytes(4).toString('hex').toUpperCase());
-      await db.insert(services).values({
+      const [res]: any = await db.insert(services).values({
         ticketId,
         customerName: record.customerName || "Unknown",
         description: record.description || "",
@@ -403,7 +590,7 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
       });
       return {
         reply: reply.replace(saveMatch[0], "").trim() + `\n\n(CRM: Service ticket ${ticketId} created successfully.)`,
-        savedRecord: record
+        savedRecord: { ...record, id: res.insertId, ticketId }
       };
     }
     return { reply: reply.replace(saveMatch[0], "").trim() };
@@ -546,6 +733,119 @@ async function startServer() {
     }
   });
 
+  // Edit/Update lead registration
+  app.put("/api/leads/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const b = req.body;
+      await db.update(registrations).set({
+        customerName: b.customerName,
+        contactName: b.contactName,
+        designation: b.designation,
+        phone: b.phone,
+        email: b.email,
+        region: b.region,
+        address: b.address,
+        mapLink: b.mapLink,
+        coordinates: b.coordinates,
+        source: b.source,
+        status: b.status,
+        implementationType: b.implementationType,
+        salesPerson: b.salesPerson,
+        salesType: b.salesType,
+        requestedPerson: b.requestedPerson,
+        comment: b.comment,
+        projectValue: b.projectValue,
+        priceDetails: b.priceDetails,
+        accessories: b.accessories,
+        newQty: parseInt(b.newQty || 0),
+        migrateQty: parseInt(b.migrateQty || 0),
+        tradingQty: parseInt(b.tradingQty || 0),
+        serviceQty: parseInt(b.serviceQty || 0),
+        otherQty: parseInt(b.otherQty || 0)
+      }).where(eq(registrations.id, parseInt(id)));
+      res.json({ success: true, message: "Lead registration updated successfully" });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Delete lead registration
+  app.delete("/api/leads/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      await db.delete(registrations).where(eq(registrations.id, parseInt(id)));
+      res.json({ success: true, message: "Lead registration deleted" });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Edit/Update service task
+  app.put("/api/services/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const b = req.body;
+      await db.update(services).set({
+        customerName: b.customerName,
+        description: b.description,
+        status: b.status,
+        quantity: parseInt(b.quantity || 1),
+        requestedPerson: b.requestedPerson,
+        payment: b.payment,
+        invoiceStatus: b.invoiceStatus,
+        paymentStatus: b.paymentStatus,
+        amount: b.amount,
+        assignee: b.assignee
+      }).where(eq(services.id, parseInt(id)));
+      res.json({ success: true, message: "Service ticket updated successfully" });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Delete service task
+  app.delete("/api/services/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      await db.delete(services).where(eq(services.id, parseInt(id)));
+      res.json({ success: true, message: "Service ticket deleted" });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Edit/Update customer definition
+  app.put("/api/customers/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const b = req.body;
+      await db.update(customers).set({
+        name: b.name,
+        contactName: b.contactName,
+        phone: b.phone,
+        email: b.email,
+        region: b.region,
+        implementationType: b.implementationType,
+        vehicleCount: parseInt(b.vehicleCount || 0)
+      }).where(eq(customers.id, parseInt(id)));
+      res.json({ success: true, message: "Customer account updated successfully" });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Delete customer definition
+  app.delete("/api/customers/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      await db.delete(customers).where(eq(customers.id, parseInt(id)));
+      res.json({ success: true, message: "Customer account deleted" });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   // Customer search
   app.get("/api/customers", async (req, res) => {
     try {
@@ -575,13 +875,13 @@ async function startServer() {
       const dbContextStr = `
 CURRENT CRM DATABASE RECORDS:
  --- Customers ---
-${allCustomers.map(c => ` * ID: ${c.id} | Name: "${c.name}" | Contact Person: "${c.contactName || ''}" | Phone: "${c.phone || ''}" | Region: "${c.region || ''}" | Vehicles count: ${c.vehicleCount || 0}`).join('\n')}
+${allCustomers.map((c: any) => ` * ID: ${c.id} | Name: "${c.name}" | Contact Person: "${c.contactName || ''}" | Phone: "${c.phone || ''}" | Region: "${c.region || ''}" | Vehicles count: ${c.vehicleCount || 0}`).join('\n')}
 
 --- Lead Registrations ---
-${allRegistrations.map(r => ` * ID: ${r.id} | Customer: "${r.customerName}" | Contact Person: "${r.contactName || ''}" | Region: "${r.region || ''}" | Status: "${r.status || 'New Lead'}"`).join('\n')}
+${allRegistrations.map((r: any) => ` * ID: ${r.id} | Customer: "${r.customerName}" | Contact Person: "${r.contactName || ''}" | Region: "${r.region || ''}" | Status: "${r.status || 'New Lead'}"`).join('\n')}
 
 --- Active Service Queue ---
-${allServices.map(s => ` * ID: ${s.id} | Customer: "${s.customerName}" | Description: "${s.description || ''}" | Status: "${s.status || 'Ongoing'}" | Assignee: "${s.assignee || 'Unassigned'}" | Amount: "${s.amount || ''}"`).join('\n')}
+${allServices.map((s: any) => ` * ID: ${s.id} | Customer: "${s.customerName}" | Description: "${s.description || ''}" | Status: "${s.status || 'Ongoing'}" | Assignee: "${s.assignee || 'Unassigned'}" | Amount: "${s.amount || ''}"`).join('\n')}
 `;
 
       const systemInstruction = `${prompts.chat_assistant}
