@@ -24,3 +24,6 @@ View your app in AI Studio: https://ai.studio/apps/5aa3d423-b97c-48f9-b2da-e5788
   -u root \
   --socket=/var/files/feros/mysql-local/data/mysqld.sock \
   -P 3307
+
+
+  ngrok http 3000

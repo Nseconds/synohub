@@ -3,7 +3,7 @@ import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { db, pool } from "./src/db";
-import { customers, registrations, services, messages } from "./src/db/schema";
+import { customers, serviceRequests, messages } from "./src/db/schema";
 import { eq, like, or } from "drizzle-orm";
 import axios from "axios";
 import crypto from "crypto";
@@ -104,144 +104,41 @@ async function initDB() {
     `);
 
     await pool.execute(`
-      CREATE TABLE IF NOT EXISTS registrations (
+      CREATE TABLE IF NOT EXISTS service_requests (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        customer_name VARCHAR(255) NOT NULL,
+        created_at VARCHAR(100),
+        source VARCHAR(100),
+        region VARCHAR(100),
+        status VARCHAR(50) DEFAULT 'New Lead',
+        implementation_type VARCHAR(100),
+        customer_name TEXT,
         contact_name VARCHAR(255),
-        designation VARCHAR(255),
         phone VARCHAR(50),
         email VARCHAR(255),
-        region VARCHAR(100),
         address TEXT,
         map_link TEXT,
         coordinates VARCHAR(100),
-        source VARCHAR(100),
-        status VARCHAR(50) DEFAULT 'New Lead',
-        implementation_type VARCHAR(100),
-        sales_person VARCHAR(100),
-        sales_type VARCHAR(100),
-        requested_person VARCHAR(100),
-        comment TEXT,
-        project_value VARCHAR(100),
-        price_details TEXT,
-        accessories TEXT,
         new_qty INT DEFAULT 0,
         migrate_qty INT DEFAULT 0,
         trading_qty INT DEFAULT 0,
         service_qty INT DEFAULT 0,
         other_qty INT DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // Ensure all possible missing columns exist if table was created before they were added
-    const columnsToCheck = [
-      { name: 'designation', definition: 'VARCHAR(255) AFTER contact_name' },
-      { name: 'address', definition: 'TEXT AFTER region' },
-      { name: 'map_link', definition: 'TEXT AFTER address' },
-      { name: 'coordinates', definition: 'VARCHAR(100) AFTER map_link' },
-      { name: 'source', definition: 'VARCHAR(100) AFTER coordinates' },
-      { name: 'sales_type', definition: 'VARCHAR(100) AFTER sales_person' },
-      { name: 'requested_person', definition: 'VARCHAR(100) AFTER sales_type' },
-      { name: 'comment', definition: 'TEXT AFTER requested_person' },
-      { name: 'project_value', definition: 'VARCHAR(100) AFTER comment' },
-      { name: 'price_details', definition: 'TEXT AFTER project_value' },
-      { name: 'accessories', definition: 'TEXT AFTER price_details' },
-      { name: 'new_qty', definition: 'INT DEFAULT 0 AFTER accessories' },
-      { name: 'migrate_qty', definition: 'INT DEFAULT 0 AFTER new_qty' },
-      { name: 'trading_qty', definition: 'INT DEFAULT 0 AFTER migrate_qty' },
-      { name: 'service_qty', definition: 'INT DEFAULT 0 AFTER trading_qty' },
-      { name: 'other_qty', definition: 'INT DEFAULT 0 AFTER service_qty' }
-    ];
-
-    for (const col of columnsToCheck) {
-      try {
-        const [exists]: any = await pool.execute(`
-          SELECT COLUMN_NAME 
-          FROM INFORMATION_SCHEMA.COLUMNS 
-          WHERE TABLE_SCHEMA = DATABASE() 
-          AND TABLE_NAME = 'registrations' 
-          AND COLUMN_NAME = '${col.name}'
-        `);
-        if (exists.length === 0) {
-          console.log(`Adding missing column '${col.name}' to 'registrations' table...`);
-          await pool.execute(`ALTER TABLE registrations ADD COLUMN ${col.name} ${col.definition}`);
-        }
-      } catch (colErr: any) {
-        // If it failed because of duplicate column (code 1060), we can safe-ignore
-        if (colErr.code === 'ER_DUP_FIELDNAME' || colErr.errno === 1060) {
-          console.log(`Column '${col.name}' already exists.`);
-        } else {
-          console.warn(`Failed to check/add '${col.name}' column:`, colErr.message);
-          // Fallback direct execution just in case
-          try {
-            await pool.execute(`ALTER TABLE registrations ADD COLUMN ${col.name} ${col.definition}`);
-          } catch (innerErr: any) {
-            if (innerErr.code !== 'ER_DUP_FIELDNAME' && innerErr.errno !== 1060) {
-              console.warn(`Direct ALTER fallback also failed for '${col.name}':`, innerErr.message);
-            }
-          }
-        }
-      }
-    }
-
-    await pool.execute(`
-      CREATE TABLE IF NOT EXISTS services (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        ticket_id VARCHAR(50) NOT NULL UNIQUE,
-        customer_name VARCHAR(255) NOT NULL,
-        description TEXT,
-        status VARCHAR(50) DEFAULT 'New',
-        quantity INT DEFAULT 1,
+        accessories TEXT,
         requested_person VARCHAR(100),
-        payment VARCHAR(50),
-        invoice_status VARCHAR(50) DEFAULT 'Not Invoiced',
-        payment_status VARCHAR(50) DEFAULT 'Not Paid',
+        sales_person VARCHAR(100),
+        sales_type VARCHAR(100),
+        project_value VARCHAR(100),
+        price_details TEXT,
+        comment TEXT,
+        issue_description TEXT,
+        location VARCHAR(100),
+        payment_status VARCHAR(50),
         amount VARCHAR(50),
-        assignee VARCHAR(100),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        vehicle_details TEXT,
+        notes TEXT,
+        job_status VARCHAR(50) DEFAULT 'Pending'
       )
     `);
-
-    // Ensure all possible missing columns exist if services table was created before they were added
-    const serviceColumnsToCheck = [
-      { name: 'quantity', definition: 'INT DEFAULT 1 AFTER status' },
-      { name: 'requested_person', definition: 'VARCHAR(100) AFTER quantity' },
-      { name: 'payment', definition: 'VARCHAR(50) AFTER requested_person' },
-      { name: 'invoice_status', definition: 'VARCHAR(50) DEFAULT \'Not Invoiced\' AFTER payment' },
-      { name: 'payment_status', definition: 'VARCHAR(50) DEFAULT \'Not Paid\' AFTER invoice_status' },
-      { name: 'amount', definition: 'VARCHAR(50) AFTER payment_status' },
-      { name: 'assignee', definition: 'VARCHAR(100) AFTER amount' }
-    ];
-
-    for (const col of serviceColumnsToCheck) {
-      try {
-        const [exists]: any = await pool.execute(`
-          SELECT COLUMN_NAME 
-          FROM INFORMATION_SCHEMA.COLUMNS 
-          WHERE TABLE_SCHEMA = DATABASE() 
-          AND TABLE_NAME = 'services' 
-          AND COLUMN_NAME = '${col.name}'
-        `);
-        if (exists.length === 0) {
-          console.log(`Adding missing column '${col.name}' to 'services' table...`);
-          await pool.execute(`ALTER TABLE services ADD COLUMN ${col.name} ${col.definition}`);
-        }
-      } catch (colErr: any) {
-        if (colErr.code === 'ER_DUP_FIELDNAME' || colErr.errno === 1060) {
-          console.log(`Column '${col.name}' already exists in services table.`);
-        } else {
-          console.warn(`Failed to check/add '${col.name}' column to services table:`, colErr.message);
-          try {
-            await pool.execute(`ALTER TABLE services ADD COLUMN ${col.name} ${col.definition}`);
-          } catch (innerErr: any) {
-            if (innerErr.code !== 'ER_DUP_FIELDNAME' && innerErr.errno !== 1060) {
-              console.warn(`Direct ALTER fallback also failed for services '${col.name}':`, innerErr.message);
-            }
-          }
-        }
-      }
-    }
 
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS messages (
@@ -270,11 +167,23 @@ async function seed() {
       return;
     }
 
+    // Safety check: skip seeding if database is already populated
+    try {
+      const [cRows]: any = await pool.execute("SELECT COUNT(*) as count FROM customers");
+      const [srRows]: any = await pool.execute("SELECT COUNT(*) as count FROM service_requests");
+      const totalCount = (cRows[0]?.count || 0) + (srRows[0]?.count || 0);
+      if (totalCount > 0) {
+        console.log(`Database already contains ${totalCount} records. Skipping CSV seed step to preserve custom database entries.`);
+        return;
+      }
+    } catch (checkErr) {
+      console.log("Database empty check failed or table not found (proceeding to seed):", (checkErr as Error).message);
+    }
+
     console.log(`Found CSV dataset at ${path.basename(csvPath)}. Truncating tables and seeding entire custom dataset...`);
     try {
       await pool.execute("TRUNCATE TABLE customers");
-      await pool.execute("TRUNCATE TABLE registrations");
-      await pool.execute("TRUNCATE TABLE services");
+      await pool.execute("TRUNCATE TABLE service_requests");
     } catch (truncateErr) {
       console.log("Truncate error ignored (continuing with database loading):", (truncateErr as Error).message);
     }
@@ -398,18 +307,40 @@ async function seed() {
 
     // Insert in batches of 50 records
     if (registrationValues.length > 0) {
-      console.log(`Seeding ${registrationValues.length} registrations...`);
-      for (let i = 0; i < registrationValues.length; i += 50) {
-        const chunk = registrationValues.slice(i, i + 50);
-        await db.insert(registrations).values(chunk);
+      console.log(`Seeding ${registrationValues.length} registrations to service_requests...`);
+      const mappedRegs = registrationValues.map(r => ({
+        customerName: r.customerName || "",
+        contactName: r.contactName || "",
+        phone: r.phone || "",
+        email: r.email || "",
+        region: r.region || "",
+        status: r.status || "New Lead",
+        implementationType: r.implementationType || "",
+        salesPerson: r.salesPerson || "",
+        projectValue: r.projectValue || "",
+        newQty: r.newQty || 0,
+        createdAt: r.createdAt ? r.createdAt.toISOString().substring(0, 10) : new Date().toISOString().substring(0, 10)
+      }));
+      for (let i = 0; i < mappedRegs.length; i += 50) {
+        const chunk = mappedRegs.slice(i, i + 50);
+        await db.insert(serviceRequests).values(chunk);
       }
     }
 
     if (serviceValues.length > 0) {
-      console.log(`Seeding ${serviceValues.length} services...`);
-      for (let i = 0; i < serviceValues.length; i += 50) {
-        const chunk = serviceValues.slice(i, i + 50);
-        await db.insert(services).values(chunk);
+      console.log(`Seeding ${serviceValues.length} services to service_requests...`);
+      const mappedServices = serviceValues.map(s => ({
+        customerName: s.customerName || "",
+        issueDescription: s.description || "",
+        jobStatus: s.status || "Pending",
+        newQty: s.quantity || 1,
+        amount: s.amount || "",
+        salesPerson: s.assignee || "",
+        createdAt: s.createdAt ? s.createdAt.toISOString().substring(0, 10) : new Date().toISOString().substring(0, 10)
+      }));
+      for (let i = 0; i < mappedServices.length; i += 50) {
+        const chunk = mappedServices.slice(i, i + 50);
+        await db.insert(serviceRequests).values(chunk);
       }
     }
 
@@ -429,6 +360,65 @@ async function seed() {
 }
 
 // Helper to handle AI record saving/updating/deletion via trigger tags
+function mapInputToSchema(input: any): any {
+  if (!input || typeof input !== "object") return {};
+  const schema: any = {};
+  
+  const getVal = (camel: string, snake: string, ...alts: string[]) => {
+    if (input[camel] !== undefined) return input[camel];
+    if (input[snake] !== undefined) return input[snake];
+    for (const alt of alts) {
+      if (input[alt] !== undefined) return input[alt];
+    }
+    return undefined;
+  };
+
+  const assignIfDefined = (targetKey: string, camel: string, snake: string, ...alts: string[]) => {
+    const val = getVal(camel, snake, ...alts);
+    if (val !== undefined) {
+      schema[targetKey] = val;
+    }
+  };
+
+  assignIfDefined("source", "source", "source");
+  assignIfDefined("region", "region", "region");
+  assignIfDefined("status", "status", "status");
+  assignIfDefined("implementationType", "implementationType", "implementation_type");
+  assignIfDefined("customerName", "customerName", "customer_name");
+  assignIfDefined("contactName", "contactName", "contact_name");
+  assignIfDefined("phone", "phone", "phone");
+  assignIfDefined("email", "email", "email");
+  assignIfDefined("address", "address", "address");
+  assignIfDefined("mapLink", "mapLink", "map_link");
+  assignIfDefined("coordinates", "coordinates", "coordinates");
+  
+  assignIfDefined("newQty", "newQty", "new_qty", "qty", "quantity");
+  assignIfDefined("migrateQty", "migrateQty", "migrate_qty");
+  assignIfDefined("tradingQty", "tradingQty", "trading_qty");
+  assignIfDefined("serviceQty", "serviceQty", "service_qty");
+  assignIfDefined("otherQty", "otherQty", "other_qty");
+  assignIfDefined("accessories", "accessories", "accessories");
+  
+  assignIfDefined("requestedPerson", "requestedPerson", "requested_person");
+  assignIfDefined("salesPerson", "salesPerson", "sales_person");
+  assignIfDefined("salesType", "salesType", "sales_type");
+  
+  assignIfDefined("projectValue", "projectValue", "project_value");
+  assignIfDefined("priceDetails", "priceDetails", "price_details");
+  assignIfDefined("comment", "comment", "comment");
+  
+  assignIfDefined("issueDescription", "issueDescription", "issue_description", "description");
+  assignIfDefined("location", "location", "location");
+  assignIfDefined("paymentStatus", "paymentStatus", "payment_status", "payment");
+  assignIfDefined("amount", "amount", "amount");
+  assignIfDefined("vehicleDetails", "vehicleDetails", "vehicle_details");
+  assignIfDefined("notes", "notes", "notes");
+  assignIfDefined("jobStatus", "jobStatus", "job_status", "status");
+  assignIfDefined("createdAt", "createdAt", "created_at");
+
+  return schema;
+}
+
 async function handleAIRecordSave(reply: string): Promise<{ reply: string; savedRecord?: any }> {
   // 1. Process [[DELETE_RECORD:...]]
   const deleteMatch = reply.match(/\[{1,2}DELETE_RECORD:(.*?)\]{1,2}/s);
@@ -444,12 +434,12 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
       const id = parseInt(record.id);
       console.log(`[AI Auto-Delete] Detected record: ${record.type}, ID: ${id}`);
       if (record.type === "registration") {
-        await db.delete(registrations).where(eq(registrations.id, id));
+        await db.delete(serviceRequests).where(eq(serviceRequests.id, id));
         return {
           reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(CRM: Registration record #${id} deleted successfully.)`
         };
       } else if (record.type === "service") {
-        await db.delete(services).where(eq(services.id, id));
+        await db.delete(serviceRequests).where(eq(serviceRequests.id, id));
         return {
           reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(CRM: Service ticket record #${id} deleted successfully.)`
         };
@@ -476,19 +466,31 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
       }
       const record = JSON.parse(rawJson);
       const id = parseInt(record.id);
-      console.log(`[AI Auto-Update] Detected record: ${record.type}, ID: ${id}`);
+      console.log(`[AI Auto-Update] Detected record update: ${record.type}, ID: ${id}`);
+      
       if (record.type === "registration") {
-        await db.update(registrations).set(record.data).where(eq(registrations.id, id));
+        const mappedData = mapInputToSchema(record.data);
+        await db.update(serviceRequests).set(mappedData).where(eq(serviceRequests.id, id));
         return {
           reply: reply.replace(updateMatch[0], "").trim() + `\n\n(CRM: Registration #${id} updated successfully.)`
         };
       } else if (record.type === "service") {
-        await db.update(services).set(record.data).where(eq(services.id, id));
+        const mappedData = mapInputToSchema(record.data);
+        await db.update(serviceRequests).set(mappedData).where(eq(serviceRequests.id, id));
         return {
           reply: reply.replace(updateMatch[0], "").trim() + `\n\n(CRM: Service ticket #${id} updated successfully.)`
         };
       } else if (record.type === "customer") {
-        await db.update(customers).set(record.data).where(eq(customers.id, id));
+        const mappedCustomer: any = {};
+        if (record.data.name || record.data.customer_name) mappedCustomer.name = record.data.name || record.data.customer_name;
+        if (record.data.contactName || record.data.contact_name) mappedCustomer.contactName = record.data.contactName || record.data.contact_name;
+        if (record.data.phone) mappedCustomer.phone = record.data.phone;
+        if (record.data.email) mappedCustomer.email = record.data.email;
+        if (record.data.region) mappedCustomer.region = record.data.region;
+        if (record.data.implementationType || record.data.implementation_type) mappedCustomer.implementationType = record.data.implementationType || record.data.implementation_type;
+        if (record.data.vehicleCount !== undefined || record.data.vehicle_count !== undefined) mappedCustomer.vehicleCount = record.data.vehicleCount !== undefined ? record.data.vehicleCount : record.data.vehicle_count;
+        
+        await db.update(customers).set(mappedCustomer).where(eq(customers.id, id));
         return {
           reply: reply.replace(updateMatch[0], "").trim() + `\n\n(CRM: Customer account #${id} updated successfully.)`
         };
@@ -513,47 +515,47 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
     console.log(`[AI Auto-Save] Detected record save: ${record.type}`);
     
     if (record.type === "registration") {
-      const [res]: any = await db.insert(registrations).values({
-        customerName: record.customerName || "Unknown",
-        contactName: record.contactName || "",
-        designation: record.designation || "",
-        phone: record.phone || "",
-        email: record.email || "",
-        region: record.region || "",
-        address: record.address || "",
-        mapLink: record.mapLink || "",
-        coordinates: record.coordinates || "",
-        source: record.source || "",
-        status: record.status || "New Lead",
-        implementationType: record.implementationType || "",
-        salesPerson: record.salesPerson || "",
-        salesType: record.salesType || "",
-        requestedPerson: record.requestedPerson || "",
-        comment: record.comment || "",
-        projectValue: record.projectValue || "",
-        priceDetails: record.priceDetails || "",
-        accessories: record.accessories || "",
-        newQty: record.qty || record.newQty || 0,
-        migrateQty: record.migrateQty || 0,
-        tradingQty: record.tradingQty || 0,
-        serviceQty: record.serviceQty || 0,
-        otherQty: record.otherQty || 0
+      const mapped = mapInputToSchema(record);
+      const [res]: any = await db.insert(serviceRequests).values({
+        customerName: mapped.customerName || "Unknown",
+        contactName: mapped.contactName || "",
+        phone: mapped.phone || "",
+        email: mapped.email || "",
+        region: mapped.region || "",
+        address: mapped.address || "",
+        mapLink: mapped.mapLink || "",
+        coordinates: mapped.coordinates || "",
+        source: mapped.source || "",
+        status: mapped.status || "New Lead",
+        implementationType: mapped.implementationType || "",
+        salesPerson: mapped.salesPerson || "",
+        salesType: mapped.salesType || "",
+        requestedPerson: mapped.requestedPerson || "",
+        comment: mapped.comment || "",
+        projectValue: mapped.projectValue || "",
+        priceDetails: mapped.priceDetails || "",
+        accessories: mapped.accessories || "",
+        newQty: mapped.newQty || 0,
+        migrateQty: mapped.migrateQty || 0,
+        tradingQty: mapped.tradingQty || 0,
+        serviceQty: mapped.serviceQty || 0,
+        otherQty: mapped.otherQty || 0
       });
 
       // Synchronize registration customer to customers table
       try {
-        const customerName = record.customerName || "Unknown";
+        const customerName = mapped.customerName || "Unknown";
         if (customerName && customerName !== "Unknown") {
           const existing = await db.select().from(customers).where(eq(customers.name, customerName));
-          const totalQty = parseInt(record.qty || record.newQty || 1);
+          const totalQty = parseInt(mapped.newQty || 1);
           if (existing.length === 0) {
             await db.insert(customers).values({
               name: customerName,
-              contactName: record.contactName || "",
-              phone: record.phone || "",
-              email: record.email || "",
-              region: record.region || "",
-              implementationType: record.implementationType || "",
+              contactName: mapped.contactName || "",
+              phone: mapped.phone || "",
+              email: mapped.email || "",
+              region: mapped.region || "",
+              implementationType: mapped.implementationType || "",
               vehicleCount: totalQty
             });
             console.log(`[AI Auto-Save] Synchronized customer ${customerName} into customers table.`);
@@ -575,18 +577,16 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
       };
     } else if (record.type === "service") {
       const ticketId = record.ticketId || ('TKT-' + crypto.randomBytes(4).toString('hex').toUpperCase());
-      const [res]: any = await db.insert(services).values({
-        ticketId,
-        customerName: record.customerName || "Unknown",
-        description: record.description || "",
-        status: record.status || "New",
-        quantity: record.quantity || 1,
-        requestedPerson: record.requestedPerson || "",
-        payment: record.payment || "",
-        invoiceStatus: record.invoiceStatus || "Not Invoiced",
-        paymentStatus: record.paymentStatus || "Not Paid",
-        amount: record.amount || "",
-        assignee: record.assignee || ""
+      const mapped = mapInputToSchema(record);
+      const [res]: any = await db.insert(serviceRequests).values({
+        customerName: mapped.customerName || "Unknown",
+        issueDescription: mapped.issueDescription || "",
+        jobStatus: mapped.jobStatus || "New",
+        newQty: mapped.newQty || 1,
+        requestedPerson: mapped.requestedPerson || "",
+        paymentStatus: mapped.paymentStatus || "",
+        amount: mapped.amount || "",
+        salesPerson: mapped.salesPerson || ""
       });
       return {
         reply: reply.replace(saveMatch[0], "").trim() + `\n\n(CRM: Service ticket ${ticketId} created successfully.)`,
@@ -626,14 +626,70 @@ async function startServer() {
   app.get("/api/data", async (req, res) => {
     try {
       const allCustomers = await db.select().from(customers);
-      const allRegistrations = await db.select().from(registrations);
-      const allServices = await db.select().from(services);
+      const allRequests = await db.select().from(serviceRequests);
+
+      // Map requests for lead registrations tab
+      const allRegistrations = allRequests.map(r => ({
+        id: r.id,
+        customerName: r.customerName || "",
+        contactName: r.contactName || "",
+        designation: r.requestedPerson || "",
+        phone: r.phone || "",
+        email: r.email || "",
+        region: r.region || "",
+        address: r.address || "",
+        mapLink: r.mapLink || "",
+        coordinates: r.coordinates || "",
+        source: r.source || "",
+        status: r.status || "New Lead",
+        implementationType: r.implementationType || "",
+        salesPerson: r.salesPerson || "",
+        salesType: r.salesType || "",
+        requestedPerson: r.requestedPerson || "",
+        comment: r.comment || "",
+        projectValue: r.projectValue ? r.projectValue.toString() : "",
+        priceDetails: r.priceDetails || "",
+        accessories: r.accessories || "",
+        newQty: r.newQty || 0,
+        migrateQty: r.migrateQty || 0,
+        tradingQty: r.tradingQty || 0,
+        serviceQty: r.serviceQty || 0,
+        otherQty: r.otherQty || 0,
+        createdAt: r.createdAt
+      }));
+
+      // Map requests for technical services queue tab
+      const allServices = allRequests.map(s => ({
+        id: s.id,
+        ticketId: s.id ? ("TKT-" + s.id) : "",
+        customerName: s.customerName || "",
+        description: s.issueDescription || s.notes || s.comment || "",
+        status: s.jobStatus || "Pending",
+        quantity: (s.newQty || 0) + (s.migrateQty || 0) + (s.tradingQty || 0) + (s.serviceQty || 0) + (s.otherQty || 0) || 1,
+        requestedPerson: s.requestedPerson || "",
+        payment: s.paymentStatus || "",
+        invoiceStatus: s.paymentStatus === "PAID" ? "Invoiced" : "Not Invoiced",
+        paymentStatus: s.paymentStatus || "",
+        amount: s.amount ? s.amount.toString() : "",
+        assignee: s.salesPerson || s.requestedPerson || "",
+        createdAt: s.createdAt,
+        location: s.location || s.region || ""
+      }));
+
       res.json({ registrations: allRegistrations, services: allServices, customers: allCustomers });
     } catch (error) {
       console.error("Dashboard data fetch failed:", error);
       res.status(500).json({ 
         error: (error as Error).message,
-        details: "Check database connection and table existence. Ensure initDB completed successfully." 
+        details: "Check database connection and table existence. Ensure initDB completed successfully.",
+        connectionConfig: {
+          host: process.env.DB_HOST || 'localhost (127.0.0.1)',
+          port: process.env.DB_PORT || '3306/3307',
+          user: process.env.DB_USER || 'root',
+          database: process.env.DB_NAME || 'testdb',
+          socketPath: process.env.DB_SOCKET || 'not provided',
+          passwordProvided: !!process.env.DB_PASSWORD
+        }
       });
     }
   });
@@ -642,31 +698,32 @@ async function startServer() {
   app.post("/api/leads/new", async (req, res) => {
     try {
       const body = req.body;
-      const [result] = await db.insert(registrations).values({
-        customerName: body.customerName || body.customer_name,
-        contactName: body.contactName || body.contact_name,
-        designation: body.designation,
-        phone: body.phone,
-        email: body.email,
-        region: body.region,
-        address: body.address,
-        mapLink: body.mapLink || body.map_link,
-        coordinates: body.coordinates,
-        source: body.source,
+      const [result] = await db.insert(serviceRequests).values({
+        customerName: body.customerName || body.customer_name || "",
+        contactName: body.contactName || body.contact_name || "",
+        phone: body.phone || "",
+        email: body.email || "",
+        region: body.region || "",
+        address: body.address || "",
+        mapLink: body.mapLink || body.map_link || "",
+        coordinates: body.coordinates || "",
+        source: body.source || "",
         status: body.status || 'New Lead',
-        implementationType: body.implementationType || body.implementation_type,
-        salesPerson: body.salesPerson || body.sales_person,
-        salesType: body.salesType || body.sales_type,
-        requestedPerson: body.requestedPerson || body.requested_person,
-        comment: body.comment,
-        projectValue: body.projectValue || body.project_value,
-        priceDetails: body.priceDetails || body.price_details,
-        accessories: body.accessories,
+        implementationType: body.implementationType || body.implementation_type || "",
+        salesPerson: body.salesPerson || body.sales_person || "",
+        salesType: body.salesType || body.sales_type || "",
+        requestedPerson: body.requestedPerson || body.requested_person || "",
+        comment: body.comment || "",
+        projectValue: body.projectValue || body.project_value || "",
+        priceDetails: body.priceDetails || body.price_details || "",
+        accessories: body.accessories || "",
         newQty: parseInt(body.newQty || body.new_qty || 0),
         migrateQty: parseInt(body.migrateQty || body.migrate_qty || 0),
         tradingQty: parseInt(body.tradingQty || body.trading_qty || 0),
         serviceQty: parseInt(body.serviceQty || body.service_qty || 0),
         otherQty: parseInt(body.otherQty || body.other_qty || 0),
+        jobStatus: 'Pending',
+        createdAt: new Date().toISOString().substring(0, 10)
       });
 
       // Synchronize lead customer to customers table
@@ -713,21 +770,21 @@ async function startServer() {
   app.post("/api/services", async (req, res) => {
     try {
       const body = req.body;
-      const ticketId = body.ticketId || body.ticket_id || ('TKT-' + crypto.randomBytes(4).toString('hex').toUpperCase());
-      const [result] = await db.insert(services).values({
-        ticketId,
-        customerName: body.customerName || body.customer_name,
-        description: body.description,
-        status: body.status || 'New',
-        quantity: parseInt(body.quantity || 1),
-        requestedPerson: body.requestedPerson || body.requested_person,
-        payment: body.payment,
-        invoiceStatus: body.invoiceStatus || body.invoice_status || 'Not Invoiced',
-        paymentStatus: body.paymentStatus || body.payment_status || 'Not Paid',
-        amount: body.amount,
-        assignee: body.assignee,
+      const [result] = await db.insert(serviceRequests).values({
+        customerName: body.customerName || body.customer_name || "",
+        issueDescription: body.description || "",
+        jobStatus: body.status || 'Pending',
+        newQty: parseInt(body.quantity || 1),
+        requestedPerson: body.requestedPerson || body.requested_person || "",
+        paymentStatus: body.payment || body.paymentStatus || "",
+        amount: body.amount || "",
+        salesPerson: body.assignee || "",
+        location: body.location || body.region || "",
+        region: body.location || body.region || "",
+        status: 'New Lead',
+        createdAt: new Date().toISOString().substring(0, 10)
       });
-      res.json({ success: true, id: result.insertId, ticket_id: ticketId, message: 'Service ticket created' });
+      res.json({ success: true, id: result.insertId, ticket_id: result.insertId ? ("TKT-" + result.insertId) : "", message: 'Service ticket created' });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -738,33 +795,74 @@ async function startServer() {
     try {
       const { id } = req.params;
       const b = req.body;
-      await db.update(registrations).set({
-        customerName: b.customerName,
-        contactName: b.contactName,
-        designation: b.designation,
+      const custName = b.customerName || b.customer_name;
+      
+      await db.update(serviceRequests).set({
+        customerName: custName,
+        contactName: b.contactName || b.contact_name,
         phone: b.phone,
         email: b.email,
         region: b.region,
         address: b.address,
-        mapLink: b.mapLink,
+        mapLink: b.mapLink || b.map_link,
         coordinates: b.coordinates,
         source: b.source,
         status: b.status,
-        implementationType: b.implementationType,
-        salesPerson: b.salesPerson,
-        salesType: b.salesType,
-        requestedPerson: b.requestedPerson,
+        implementationType: b.implementationType || b.implementation_type,
+        salesPerson: b.salesPerson || b.sales_person,
+        salesType: b.salesType || b.sales_type,
+        requestedPerson: b.requestedPerson || b.requested_person,
         comment: b.comment,
-        projectValue: b.projectValue,
-        priceDetails: b.priceDetails,
+        projectValue: b.projectValue || b.project_value,
+        priceDetails: b.priceDetails || b.price_details,
         accessories: b.accessories,
-        newQty: parseInt(b.newQty || 0),
-        migrateQty: parseInt(b.migrateQty || 0),
-        tradingQty: parseInt(b.tradingQty || 0),
-        serviceQty: parseInt(b.serviceQty || 0),
-        otherQty: parseInt(b.otherQty || 0)
-      }).where(eq(registrations.id, parseInt(id)));
-      res.json({ success: true, message: "Lead registration updated successfully" });
+        newQty: parseInt(b.newQty || b.new_qty || 0),
+        migrateQty: parseInt(b.migrateQty || b.migrate_qty || 0),
+        tradingQty: parseInt(b.tradingQty || b.trading_qty || 0),
+        serviceQty: parseInt(b.serviceQty || b.service_qty || 0),
+        otherQty: parseInt(b.otherQty || b.other_qty || 0)
+      }).where(eq(serviceRequests.id, parseInt(id)));
+
+      // Synchronize lead customer details to customers table on lead edit
+      try {
+        if (custName && custName !== "Unknown") {
+          const existing = await db.select().from(customers).where(eq(customers.name, custName));
+          const totalQty = parseInt(b.newQty || b.new_qty || 0) + 
+                           parseInt(b.migrateQty || b.migrate_qty || 0) + 
+                           parseInt(b.tradingQty || b.trading_qty || 0) + 
+                           parseInt(b.serviceQty || b.service_qty || 0) + 
+                           parseInt(b.otherQty || b.other_qty || 0);
+
+          if (existing.length === 0) {
+            await db.insert(customers).values({
+              name: custName,
+              contactName: b.contactName || b.contact_name || "",
+              phone: b.phone || "",
+              email: b.email || "",
+              region: b.region || "",
+              implementationType: b.implementationType || b.implementation_type || "",
+              vehicleCount: totalQty > 0 ? totalQty : 1
+            });
+            console.log(`[API Leads/Edit] Created synchronized customer ${custName} on lead edit.`);
+          } else {
+            await db.update(customers)
+              .set({ 
+                contactName: b.contactName || b.contact_name || existing[0].contactName,
+                phone: b.phone || existing[0].phone,
+                email: b.email || existing[0].email,
+                region: b.region || existing[0].region,
+                implementationType: b.implementationType || b.implementation_type || existing[0].implementationType,
+                vehicleCount: totalQty > 0 ? totalQty : existing[0].vehicleCount
+              })
+              .where(eq(customers.name, custName));
+            console.log(`[API Leads/Edit] Synchronized existing customer ${custName} details.`);
+          }
+        }
+      } catch (custErr) {
+        console.error("API failed to sync customer on update:", custErr);
+      }
+
+      res.json({ success: true, message: "Lead registration updated and customer synchronized successfully" });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -774,7 +872,7 @@ async function startServer() {
   app.delete("/api/leads/:id", async (req, res) => {
     try {
       const { id } = req.params;
-      await db.delete(registrations).where(eq(registrations.id, parseInt(id)));
+      await db.delete(serviceRequests).where(eq(serviceRequests.id, parseInt(id)));
       res.json({ success: true, message: "Lead registration deleted" });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -786,18 +884,17 @@ async function startServer() {
     try {
       const { id } = req.params;
       const b = req.body;
-      await db.update(services).set({
+      await db.update(serviceRequests).set({
         customerName: b.customerName,
-        description: b.description,
-        status: b.status,
-        quantity: parseInt(b.quantity || 1),
+        issueDescription: b.description,
+        jobStatus: b.status,
+        newQty: parseInt(b.quantity || 1),
         requestedPerson: b.requestedPerson,
-        payment: b.payment,
-        invoiceStatus: b.invoiceStatus,
-        paymentStatus: b.paymentStatus,
+        paymentStatus: b.payment,
         amount: b.amount,
-        assignee: b.assignee
-      }).where(eq(services.id, parseInt(id)));
+        salesPerson: b.assignee,
+        location: b.location
+      }).where(eq(serviceRequests.id, parseInt(id)));
       res.json({ success: true, message: "Service ticket updated successfully" });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -808,7 +905,7 @@ async function startServer() {
   app.delete("/api/services/:id", async (req, res) => {
     try {
       const { id } = req.params;
-      await db.delete(services).where(eq(services.id, parseInt(id)));
+      await db.delete(serviceRequests).where(eq(serviceRequests.id, parseInt(id)));
       res.json({ success: true, message: "Service ticket deleted" });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -869,8 +966,28 @@ async function startServer() {
 
       // Fetch live DB Context
       const allCustomers = await db.select().from(customers);
-      const allRegistrations = await db.select().from(registrations);
-      const allServices = await db.select().from(services);
+      const allRequests = await db.select().from(serviceRequests);
+
+      // Map requests for lead registrations context description
+      const allRegistrations = allRequests.map(r => ({
+        id: r.id,
+        customerName: r.customerName || "",
+        contactName: r.contactName || "",
+        region: r.region || "",
+        location: r.location || "",
+        status: r.status || "New Lead"
+      }));
+
+      // Map requests for technical services context description
+      const allServices = allRequests.map(s => ({
+        id: s.id,
+        customerName: s.customerName || "",
+        description: s.issueDescription || s.notes || s.comment || "",
+        status: s.jobStatus || "Pending",
+        assignee: s.salesPerson || s.requestedPerson || "Unassigned",
+        location: s.location || "",
+        amount: s.amount || ""
+      }));
 
       const dbContextStr = `
 CURRENT CRM DATABASE RECORDS:
@@ -878,50 +995,108 @@ CURRENT CRM DATABASE RECORDS:
 ${allCustomers.map((c: any) => ` * ID: ${c.id} | Name: "${c.name}" | Contact Person: "${c.contactName || ''}" | Phone: "${c.phone || ''}" | Region: "${c.region || ''}" | Vehicles count: ${c.vehicleCount || 0}`).join('\n')}
 
 --- Lead Registrations ---
-${allRegistrations.map((r: any) => ` * ID: ${r.id} | Customer: "${r.customerName}" | Contact Person: "${r.contactName || ''}" | Region: "${r.region || ''}" | Status: "${r.status || 'New Lead'}"`).join('\n')}
+${allRegistrations.map((r: any) => ` * ID: ${r.id} | Customer: "${r.customerName}" | Contact Person: "${r.contactName || ''}" | Region: "${r.region || ''}" | Location: "${r.location || ''}" | Status: "${r.status || 'New Lead'}"`).join('\n')}
 
 --- Active Service Queue ---
-${allServices.map((s: any) => ` * ID: ${s.id} | Customer: "${s.customerName}" | Description: "${s.description || ''}" | Status: "${s.status || 'Ongoing'}" | Assignee: "${s.assignee || 'Unassigned'}" | Amount: "${s.amount || ''}"`).join('\n')}
+${allServices.map((s: any) => ` * ID: ${s.id} | Customer: "${s.customerName}" | Description: "${s.description || ''}" | Status: "${s.status || 'Ongoing'}" | Assignee: "${s.assignee || 'Unassigned'}" | Location: "${s.location || ''}" | Amount: "${s.amount || ''}"`).join('\n')}
 `;
 
-      const systemInstruction = `${prompts.chat_assistant}
+      // Dynamically load prompts to ensure any manual or UI updates to prompts.json are picked up in real-time
+      let currentPrompts = { ...prompts };
+      try {
+        if (fs.existsSync(promptsPath)) {
+          const fileData = JSON.parse(fs.readFileSync(promptsPath, "utf8"));
+          currentPrompts = { ...currentPrompts, ...fileData };
+        }
+      } catch (err) {
+        console.error("Failed to load prompts dynamically, using in-memory defaults:", err);
+      }
+
+      const systemInstruction = `${currentPrompts.chat_assistant}
 
 ${dbContextStr}
 
 CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
 1. ACT HUMAN & OPERATIONAL: Reply like a human sales or fleets officer in Dubai of Synosys Fleet Intelligence. Keep conversations natural, friendly, highly custom, and warm. Use phrases like "Oh, let me look that up!", "Great, Vishnu!", or "Welcome back."
-2. DATABASE LOOKUP & MULTI-BRANCH CLARIFICATION:
-   - When a user enters a customer name (e.g. "Clymet", "Inspirentals"), check the lists of active CRM Customers and Lead Registrations above.
-   - If there are MULTIPLE similar/matching accounts (e.g. "Clymet Logistics", "Clymet Abu Dhabi", "Clymet Sharjah Co" etc.), stop. DO NOT log any record yet. Output a highly conversational response listing the matches and ask: "I searched our CRM database and found a few accounts for 'Clymet':
-     1. Clymet Logistics (region: DIP / kizad)
-     2. Clymet Abu Dhabi (region: Abu Dhabi)
-     3. Clymet Sharjah Co (region: Sharjah)
-     Could you please clarify which of these accounts you are asking about, or if we should register a brand-new entity?"
-   - Similarly for "Inspirentals", we have:
-     1. INSPIRENTALS MIDDLE EAST REAL ESTATE LEASE AND MANAGEMENT SERVICES LLC (Abu Dhabi)
-     2. Inspirentals Dubai Branch (Dubai)
-     Clarify which branch they mean!
-3. CONVERSATIONAL FILLING ("DON'T BE ROBOTIC"):
-   - Real humans don't paste perfect structures. They type in fragments (e.g. "Create a service ticket for Clymet" or "Register Ms. Aan").
-   - If they ask to save/create/register something but leave out important details (like quantity, contact phone number, implementation type, or location region), DO NOT output a trigger save block yet unless they say "save what you have".
-   - Instead, reply instantly with human warmth and ask for the missing details step-by-step: "Absolutely, I can help you file that lead. I saw that they are [Customer Name]. What is the correct quantity of devices or location region for this lead?"
-4. TRIGGER SAVE FORMAT:
+2. DYNAMIC LOOKUP & MULTI-BRANCH CLARIFICATION:
+   - When a user enters a customer or company name (such as "Clymate", "Clymet", "Inspirentals"), check the lists of active CRM Customers, Lead Registrations, and Services in the CURRENT CRM DATABASE RECORDS above.
+   - If there are MULTIPLE similar/matching records in the database (e.g. searching for "Clymate" or "Clymet" matches Clymate Logistics, Clymate Technical Services, Clymate Transport, etc., or multiple branches of Inspirentals), STOP immediately. Do NOT register or default to a single choice, and do NOT output a SAVE block yet.
+   - You MUST dynamically parse the active database context, list the ACTUAL matching records clearly with their details (database ID, customer name, region, and location if available), and ask the user to clarify which specific search result they mean, or if they are registering a brand-new entity entirely.
+   - Example format you should use for listing live matches:
+     "I searched our database and found a few active accounts matching 'Clymate'. Could you please clarify which of these accounts you are asking about, or if we should register a brand-new entity?
+     - Clymate Logistics (ID: #1001, Region: Dubai, Location: DIP)
+     - Clymate Logistics (ID: #1002, Region: Abu Dhabi, Location: KIZAD)
+     - Clymate Technical Services (ID: #1003, Region: Abu Dhabi, Location: Musaffah)
+     - Clymate Transport (ID: #1004, Region: Dubai, Location: Al Quoz)"
+   - Always list the REAL matching records found in CURRENT CRM DATABASE RECORDS. Do not invent simulated entities if they are not in the context string.
+3. MANDATORY ALIGNED KEY-VALUE DISPLAY FORMAT:
+   - When representing, summarizing, displaying, or confirming any Lead Registration or Service Ticket record (whether creating or updating), you MUST output exactly this aligned block format:
+     Service Type       : [Service / Implementation Type here, e.g. LOCATOR]
+     Customer Name      : [Contact Name here] | [Customer Name here]
+     Contact Number     : [Phone number here]
+     Quantity           : [Quantity of devices here, e.g. 1]
+     Payment            : [PAID/Pending/Not Applicable here]
+     Amount             : [Amount here if any]
+     Location           : [Location/Region here, e.g. Abu Dhabi]
+     Description        : [Description of issue here, e.g. No Connection]
+4. CONVERSATIONAL FILLING & STEP-BY-STEP INFORMATION GATHERING:
+   - Real humans type in fragments. If they request to file, create, save, or register something but essential details (specifically: contact phone number, location region, device quantity, status, or implementation type) are missing, do NOT output a trigger tag.
+   - Instead, reply instantly with human warmth and ask for the missing details step-by-step.
+5. TRIGGER SAVE FORMAT:
    When you do have sufficient details (such as customer name, contact phone, region, status: "New Lead", salesType: "New" or "Existing", and quantity), output your friendly reply followed by the TRIGGER BLOCK at the very end. The trigger block MUST use exactly this format:
    [[SAVE_RECORD:{"type":"registration","customerName":"...","contactName":"...","phone":"...","email":"...","region":"...","implementationType":"...","status":"New Lead","salesType":"Existing","requestedPerson":"...","comment":"...","qty":1}]]
-   OR if it is a service:
+   OR if it is a service ticket save:
    [[SAVE_RECORD:{"type":"service","customerName":"...","description":"...","assignee":"...","amount":"...","payment":"..."}]]
 `;
 
-      // Prefer Gemini if available
+       // Prefer Gemini if available
       if (genAI) {
         try {
           console.log("[AI Chat] Using Gemini 3.5 API with rich live DB context...");
+          
+          // Format/clean history strictly for Gemini's alternating role requirements
+          const cleanedHistory: any[] = [];
+          if (Array.isArray(history)) {
+            const rawMapped = history
+              .map((h: any) => {
+                const role = (h.role === "assistant" || h.role === "model") ? "model" : "user";
+                const text = h.content || (h.parts && h.parts[0]?.text) || "";
+                return { role, text: text.trim() };
+              })
+              .filter(h => h.text !== "");
+
+            for (const item of rawMapped) {
+              if (cleanedHistory.length === 0) {
+                // First message in history must be 'user' to begin a chat session turn correctly
+                if (item.role === "user") {
+                  cleanedHistory.push({
+                    role: "user",
+                    parts: [{ text: item.text }]
+                  });
+                }
+              } else {
+                const prev = cleanedHistory[cleanedHistory.length - 1];
+                if (prev.role === item.role) {
+                  // Merge duplicate consecutive roles to maintain alternating order
+                  prev.parts[0].text += "\n\n" + item.text;
+                } else {
+                  cleanedHistory.push({
+                    role: item.role,
+                    parts: [{ text: item.text }]
+                  });
+                }
+              }
+            }
+
+            // To send a new message, the history must end with a 'model' message
+            if (cleanedHistory.length > 0 && cleanedHistory[cleanedHistory.length - 1].role === "user") {
+              cleanedHistory.pop();
+            }
+          }
+
           const chat = genAI.chats.create({
             model: "gemini-3.5-flash",
-            history: history.map((h: any) => ({
-              role: h.role === "assistant" ? "model" : "user",
-              parts: [{ text: h.content }],
-            })),
+            history: cleanedHistory,
             config: {
               systemInstruction: systemInstruction,
             },
@@ -1027,13 +1202,47 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
 
       // Split log into messages (simple regex for date/time pattern)
       const messages_raw = rawLog.split(/\n(?=\d{2}\/\d{2}\/\d{4},)/g);
-      
+      const batch = messages_raw.slice(0, 10).join("\n---\n"); // Process first 10 for demo speed
+
+      // Dynamically load prompts to ensure any manual or UI updates to prompts.json are picked up in real-time
+      let currentPrompts = { ...prompts };
+      try {
+        if (fs.existsSync(promptsPath)) {
+          const fileData = JSON.parse(fs.readFileSync(promptsPath, "utf8"));
+          currentPrompts = { ...currentPrompts, ...fileData };
+        }
+      } catch (err) {
+        console.error("Failed to load prompts dynamically in /api/ingest:", err);
+      }
+
+      // 1. Try Gemini first if available
+      if (genAI) {
+        try {
+          console.log("[AI Ingest] Using Gemini 3.5 API with log extractor prompt...");
+          const startTime = Date.now();
+          const response = await genAI.models.generateContent({
+            model: "gemini-3.5-flash",
+            contents: "Extract records from these logs:\n" + batch,
+            config: {
+              systemInstruction: currentPrompts.log_extractor,
+              responseMimeType: "application/json"
+            }
+          });
+          console.log(`[AI Ingest] Gemini Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+          let content = response.text;
+          content = content.replace(/```json|```/g, "").trim();
+          const extracted = JSON.parse(content);
+          return res.json({ extracted });
+        } catch (geminiErr) {
+          console.error("Gemini API failed for log extraction, falling back to Ollama:", (geminiErr as Error).message);
+        }
+      }
+
+      // 2. Fall back to Ollama
       let ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
       if (!ollamaUrl.endsWith("/api/chat")) {
         ollamaUrl = ollamaUrl.replace(/\/$/, "") + "/api/chat";
       }
-
-      const batch = messages_raw.slice(0, 10).join("\n---\n"); // Process first 10 for demo speed
 
       const ollamaOptions: any = {
         num_ctx: parseInt(process.env.OLLAMA_NUM_CTX || "2048"),
@@ -1055,7 +1264,7 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
       const response = await axios.post(ollamaUrl, {
         model: process.env.OLLAMA_MODEL || "llama3:latest",
         messages: [
-          { role: "system", content: prompts.log_extractor },
+          { role: "system", content: currentPrompts.log_extractor },
           { role: "user", content: "Extract records from these logs:\n" + batch }
         ],
         options: ollamaOptions,
@@ -1090,10 +1299,9 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
       const { records } = req.body;
       for (const rec of records) {
         if (rec.type === "registration") {
-          await db.insert(registrations).values({
+          await db.insert(serviceRequests).values({
             customerName: rec.customerName,
             contactName: rec.contactName,
-            designation: rec.designation,
             phone: rec.phone,
             email: rec.email,
             region: rec.region,
@@ -1117,19 +1325,15 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
             otherQty: rec.otherQty || 0
           });
         } else if (rec.type === "service") {
-          const ticketId = rec.ticketId || ('TKT-' + crypto.randomBytes(4).toString('hex').toUpperCase());
-          await db.insert(services).values({
-            ticketId,
+          await db.insert(serviceRequests).values({
             customerName: rec.customerName,
-            description: rec.description,
-            status: rec.status || 'New',
-            quantity: rec.quantity || 1,
+            issueDescription: rec.description,
+            jobStatus: rec.status || 'Pending',
+            newQty: rec.quantity || 1,
             requestedPerson: rec.requestedPerson,
-            payment: rec.payment,
-            invoiceStatus: rec.invoiceStatus || 'Not Invoiced',
-            paymentStatus: rec.paymentStatus || 'Not Paid',
+            paymentStatus: rec.payment,
             amount: rec.amount,
-            assignee: rec.assignee
+            salesPerson: rec.assignee
           });
         }
       }

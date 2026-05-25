@@ -1,909 +1,2264 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef } from "react";
+import { LayoutDashboard, Users, ClipboardList as TooltipIcon, MessageSquare, Plus, Search, Send, MapPin, Package, Clock, Phone, Mail, ChevronRight, Activity, Zap, Shield, Database, FileUp, Sparkles, CheckCircle2, Minus, Square, X, ClipboardList } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import { cn } from "./lib/utils";
+import axios from "axios";
 
-// ─── CONSTANTS ────────────────────────────────────────────────────────────────
-const SOURCES = ["Door to Door","Referral","Company Lead","Cold Calling","Dealer","Other","MECAF2019"];
-const REGIONS = ["Sharjah","Dubai","Abu Dhabi","Ajman","Fujairah","Ras Al Khaimah","Umm Al Quwain"];
-const LEAD_STATUSES = ["New Lead","Proposed","Won","Hold","Lost","Completed","Duplicate","Demo","Check for Migration","Pseudo Leads","Deleted"];
-const IMPL_TYPES = ["LOCATOR","ASATEEL","LOCATOR+ASATEEL","SECUREPATH","LOCATOR+SECUREPATH","RASID","SERVICE","SHAHIN","SECUREPATH PREMIUM","LOCATOR+SECUREPATH PREMIUM","LOCATOR+RASID","OTHER"];
-const SALES_PEOPLE = ["Ajmal","Deepak","Nishad","Shams","Umar","Vishal"];
-const SALES_TYPES = ["New","Migration","Trading","New and Migrate","New and Trading","Migrate and Trading","New and Migrate and Trading","Existing"];
-const REQ_PEOPLE = ["Ajmal","Amrutha","Athul","Celine","Deepak","Faizal","Ivy","Midhun","Mohamed Musthafa","Naseeb","Nisam","Nishad","Rasick","Reyn","Shamnad","Shams","Shyamjith","Umar","Vaishakh Tech"];
-const TICKET_STATUSES = ["New","Hold","Ongoing","Completed","Followed up"];
-const PAY_OPTIONS = ["Applicable","Not Applicable"];
-const INV_STATUSES = ["Not Invoiced","Invoiced"];
-const PAY_STATUSES = ["Not Paid","Paid"];
-const ISSUE_TYPES = ["No Connection","GPS Offline","Device Offline","Ignition Issue","Power Cut","Camera Fault","Tracking Stopped","Device Not Responding","Battery Issue","Signal Lost"];
-const TECHNICIANS = ["Athul","Faizal","Midhun","Rasick","Reyn","Shamnad","Shyamjith","Vaishakh Tech"];
+// --- Types ---
+interface Customer {
+  id: number;
+  name: string;
+  contactName: string;
+  phone: string;
+  email: string;
+  region: string;
+  implementationType: string;
+  vehicleCount: number;
+}
 
-// ─── INITIAL SEED DATA ────────────────────────────────────────────────────────
-const SEED_CUSTOMERS = [
-  { id:1, name:"Emirates Freight LLC", contactName:"Khaled Al Mansoori", phone:"+971501234567", email:"khaled@emiratesfreight.ae", region:"Dubai", implementationType:"LOCATOR", vehicleCount:45 },
-  { id:2, name:"Haya Decorations", contactName:"Fatima Al Zaabi", phone:"+971509876543", email:"fatima@haya.ae", region:"Abu Dhabi", implementationType:"LOCATOR+ASATEEL", vehicleCount:12 },
-  { id:3, name:"Clymet Logistics", contactName:"Ravi Kumar", phone:"+971551122334", email:"ravi@clymet.ae", region:"Sharjah", implementationType:"SECUREPATH", vehicleCount:28 },
-  { id:4, name:"Inspirentals Abu Dhabi", contactName:"Ahmed Siddiqui", phone:"+971508887766", email:"ahmed@inspirentals.ae", region:"Abu Dhabi", implementationType:"LOCATOR", vehicleCount:7 },
-  { id:5, name:"Gulf Star Transport", contactName:"Priya Menon", phone:"+971564433221", email:"priya@gulfstar.ae", region:"Dubai", implementationType:"ASATEEL", vehicleCount:33 },
-];
+interface Registration {
+  id: number;
+  customerName: string;
+  contactName: string;
+  designation?: string;
+  phone: string;
+  email: string;
+  region: string;
+  address?: string;
+  mapLink?: string;
+  coordinates?: string;
+  source?: string;
+  status: string;
+  implementationType: string;
+  salesPerson: string;
+  salesType: string;
+  requestedPerson?: string;
+  comment?: string;
+  projectValue?: string;
+  priceDetails?: string;
+  accessories?: string;
+  newQty: number;
+  migrateQty: number;
+  tradingQty: number;
+  serviceQty: number;
+  otherQty: number;
+  createdAt: string;
+}
 
-const SEED_LEADS = [
-  { id:1, customerName:"Emirates Freight LLC", contactName:"Khaled Al Mansoori", designation:"Fleet Manager", phone:"+971501234567", email:"khaled@emiratesfreight.ae", region:"Dubai", address:"Al Quoz Industrial Area", mapLink:"", coordinates:"", source:"Company Lead", status:"Won", implementationType:"LOCATOR", salesPerson:"Nishad", salesType:"New", requestedPerson:"Athul", comment:"Large fleet expansion", projectValue:"AED 85,000", priceDetails:"450/unit", accessories:"Panic button x45", newQty:45, migrateQty:0, tradingQty:0, serviceQty:0, otherQty:0, createdAt:"2025-01-15" },
-  { id:2, customerName:"Haya Decorations", contactName:"Fatima Al Zaabi", designation:"Director", phone:"+971509876543", email:"fatima@haya.ae", region:"Abu Dhabi", address:"Mussafah Industrial", mapLink:"", coordinates:"", source:"Referral", status:"Proposed", implementationType:"LOCATOR+ASATEEL", salesPerson:"Shams", salesType:"New", requestedPerson:"Rasick", comment:"Budget discussion ongoing", projectValue:"AED 22,000", priceDetails:"", accessories:"", newQty:12, migrateQty:0, tradingQty:0, serviceQty:0, otherQty:0, createdAt:"2025-02-10" },
-  { id:3, customerName:"Clymet Logistics", contactName:"Ravi Kumar", designation:"Operations Head", phone:"+971551122334", email:"ravi@clymet.ae", region:"Sharjah", address:"Industrial Area 18", mapLink:"", coordinates:"", source:"Cold Calling", status:"Won", implementationType:"SECUREPATH", salesPerson:"Deepak", salesType:"Migration", requestedPerson:"Shyamjith", comment:"Migration from old provider", projectValue:"AED 42,000", priceDetails:"", accessories:"", newQty:0, migrateQty:28, tradingQty:0, serviceQty:0, otherQty:0, createdAt:"2025-03-05" },
-];
+interface ServiceTicket {
+  id: number;
+  ticketId: string;
+  customerName: string;
+  description: string;
+  status: string;
+  quantity?: number;
+  requestedPerson?: string;
+  payment?: string;
+  invoiceStatus?: string;
+  paymentStatus?: string;
+  amount: string;
+  assignee: string;
+  createdAt: string;
+}
 
-const SEED_SERVICES = [
-  { id:1, ticketId:"SVC-001", customerName:"Emirates Freight LLC", description:"No Connection - 3 units offline since yesterday. Vehicles: DXB-1234, DXB-1235, DXB-1236", status:"Ongoing", quantity:3, requestedPerson:"Athul", payment:"Applicable", invoiceStatus:"Not Invoiced", paymentStatus:"Not Paid", amount:"AED 450", assignee:"Faizal", createdAt:"2025-05-20" },
-  { id:2, ticketId:"SVC-002", customerName:"Haya Decorations", description:"GPS Offline - Tracker not updating location for van ABD-5678", status:"New", quantity:1, requestedPerson:"Rasick", payment:"Not Applicable", invoiceStatus:"Not Invoiced", paymentStatus:"Not Paid", amount:"", assignee:"", createdAt:"2025-05-22" },
-  { id:3, ticketId:"SVC-003", customerName:"Gulf Star Transport", description:"Device Not Responding - unit completely dead, possible power cut", status:"Hold", quantity:1, requestedPerson:"Reyn", payment:"Applicable", invoiceStatus:"Invoiced", paymentStatus:"Paid", amount:"AED 150", assignee:"Midhun", createdAt:"2025-05-23" },
-];
+const SOURCES = ["Door to Door", "Referral", "Company Lead", "Cold Calling", "Dealer", "Other", "MECAF2019"];
+const REGIONS = ["Sharjah", "Dubai", "Abu Dhabi", "Ajman", "Fujairah", "Ras Al Khaimah", "Umm Al Quwain"];
+const LEAD_STATUSES = ["New Lead", "Proposed", "Won", "Hold", "Lost", "Completed", "Duplicate", "Demo", "Check for Migration", "Pseudo Leads", "Deleted"];
+const IMPLEMENTATION_TYPES = ["LOCATOR", "ASATEEL", "LOCATOR+ASATEEL", "SECUREPATH", "LOCATOR+SECUREPATH", "RASID", "SERVICE", "SHAHIN", "SECUREPATH PREMIUM", "LOCATOR+SECUREPATH PREMIUM", "LOCATOR+RASID", "OTHER"];
+const SALES_PEOPLE = ["Ajmal", "Deepak", "Nishad", "Shams", "Umar", "Vishal"];
+const SALES_TYPES = ["New", "Migration", "Trading", "New and Migrate", "New and Trading", "Migrate and Trading", "New and Migrate and Trading", "Existing"];
+const REQUESTED_PEOPLE = ["Ajmal", "Amrutha", "Athul", "Celine", "Deepak", "Faizal", "Ivy", "Midhun", "Mohamed Musthafa", "Naseeb", "Nishad", "Rasick", "Reyn", "Shamnad", "Shams", "Shyamjith"];
+const TICKET_STATUSES = ["New", "Hold", "Ongoing", "Completed", "Followed up"];
+const PAYMENT_OPTIONS = ["Applicable", "Not Applicable"];
+const INVOICE_STATUSES = ["Not Invoiced", "Invoiced"];
+const PAYMENT_STATUSES = ["Not Paid", "Paid"];
 
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
-const cn = (...classes) => classes.filter(Boolean).join(" ");
-const uid = () => Math.random().toString(36).slice(2,8).toUpperCase();
-const statusColor = (s) => {
-  const m = { Won:"bg-emerald-100 text-emerald-700", Lost:"bg-red-100 text-red-700", Proposed:"bg-sky-100 text-sky-700", "New Lead":"bg-indigo-100 text-indigo-700", Hold:"bg-amber-100 text-amber-700", Completed:"bg-teal-100 text-teal-700", New:"bg-indigo-100 text-indigo-700", Ongoing:"bg-sky-100 text-sky-700", "Followed up":"bg-purple-100 text-purple-700" };
-  return m[s] || "bg-zinc-100 text-zinc-600";
-};
-
-// ─── FORM DEFAULTS ────────────────────────────────────────────────────────────
-const defaultLead = () => ({ customerName:"", contactName:"", designation:"", phone:"", email:"", region:REGIONS[0], address:"", mapLink:"", coordinates:"", source:SOURCES[0], status:"New Lead", implementationType:IMPL_TYPES[0], salesPerson:SALES_PEOPLE[0], salesType:SALES_TYPES[0], requestedPerson:"", comment:"", projectValue:"", priceDetails:"", accessories:"", newQty:0, migrateQty:0, tradingQty:0, serviceQty:0, otherQty:0 });
-const defaultTicket = () => ({ customerName:"", description:"", status:"New", quantity:1, requestedPerson:"", payment:PAY_OPTIONS[0], invoiceStatus:INV_STATUSES[0], paymentStatus:PAY_STATUSES[0], amount:"", assignee:"" });
-
-// ─── FIELD COMPONENT ──────────────────────────────────────────────────────────
-const F = ({ label, required, children }) => (
-  <div className="space-y-1">
-    <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
-      {label}{required && <span className="text-red-500 ml-0.5">*</span>}
-    </label>
-    {children}
-  </div>
-);
-const inp = "w-full bg-zinc-50 border border-zinc-200 rounded-lg px-3 py-2 text-xs text-zinc-800 font-medium focus:outline-none focus:border-teal-500/50 focus:bg-white transition-all";
-
-// ─── NAV ICONS (inline SVG) ───────────────────────────────────────────────────
-const Icons = {
-  Dashboard: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>,
-  Plus: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><path d="M12 5v14M5 12h14"/></svg>,
-  Edit: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
-  Bot: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4M8 14h.01M16 14h.01"/></svg>,
-  DB: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>,
-  Ticket: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><path d="M15 5v2m0 4v2m0 4v2M5 5a2 2 0 0 0-2 2v3a2 2 0 0 1 0 4v3a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3a2 2 0 0 1 0-4V7a2 2 0 0 0-2-2H5z"/></svg>,
-  Send: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><path d="M22 2L11 13"/><path d="M22 2L15 22l-4-9-9-4 20-7z"/></svg>,
-  Search: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>,
-  X: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><path d="M18 6L6 18M6 6l12 12"/></svg>,
-  Shield: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>,
-  Truck: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><rect x="1" y="3" width="15" height="13"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>,
-  Users: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
-  Zap: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>,
-  Trash: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><path d="M3 6h18M19 6l-1 14H6L5 6M10 11v6M14 11v6M9 6V4h6v2"/></svg>,
-  Pen: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>,
-  Check: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="w-4 h-4"><path d="M20 6L9 17l-5-5"/></svg>,
-};
-
-// ─── MODAL ────────────────────────────────────────────────────────────────────
-const Modal = ({ isOpen, onClose, title, children, wide }) => (
+const Modal = ({ isOpen, onClose, title, children }: { isOpen: boolean, onClose: () => void, title: string, children: React.ReactNode }) => (
   <AnimatePresence>
     {isOpen && (
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-        <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={onClose} className="absolute inset-0 bg-zinc-900/50 backdrop-blur-sm" />
-        <motion.div initial={{opacity:0,scale:0.95,y:20}} animate={{opacity:1,scale:1,y:0}} exit={{opacity:0,scale:0.95,y:20}} className={cn("bg-white rounded-2xl shadow-2xl w-full overflow-hidden relative z-10 flex flex-col max-h-[90vh]", wide ? "max-w-5xl" : "max-w-2xl")}>
-          <div className="px-6 py-4 border-b border-zinc-100 flex items-center justify-between bg-zinc-50 shrink-0">
-            <h3 className="font-bold text-zinc-900 text-sm">{title}</h3>
-            <button onClick={onClose} className="p-1.5 hover:bg-zinc-200 rounded-lg text-zinc-400 transition-colors"><Icons.X /></button>
+        <motion.div 
+          initial={{ opacity: 0 }} 
+          animate={{ opacity: 1 }} 
+          exit={{ opacity: 0 }} 
+          onClick={onClose}
+          className="absolute inset-0 bg-zinc-900/40 backdrop-blur-sm" 
+        />
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.95, y: 20 }} 
+          animate={{ opacity: 1, scale: 1, y: 0 }} 
+          exit={{ opacity: 0, scale: 0.95, y: 20 }} 
+          className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden relative z-10 flex flex-col"
+        >
+          <div className="px-6 py-4 border-b border-zinc-100 flex items-center justify-between bg-zinc-50">
+            <h3 className="font-bold text-zinc-900 flex items-center gap-2">
+               <Plus size={18} className="text-teal-accent" /> {title}
+            </h3>
+            <button onClick={onClose} className="p-2 hover:bg-zinc-200 rounded-lg transition-colors text-zinc-400">
+               <Activity size={18} />
+            </button>
           </div>
-          <div className="p-6 overflow-y-auto">{children}</div>
+          <div className="p-8 overflow-y-auto">
+            {children}
+          </div>
         </motion.div>
       </div>
     )}
   </AnimatePresence>
 );
 
-// ─── LEAD FORM BODY ───────────────────────────────────────────────────────────
-const LeadFormBody = ({ form, setForm, customers, onSubmit, submitLabel = "SAVE RECORD", isExisting = false }) => {
-  const total = (form.newQty||0)+(form.migrateQty||0)+(form.tradingQty||0)+(form.serviceQty||0)+(form.otherQty||0);
-  return (
-    <form onSubmit={onSubmit} className="space-y-5">
-      {/* Auto-fill from existing customer */}
-      <div className="flex items-center gap-2 pb-3 border-b border-zinc-100">
-        <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-widest shrink-0">Auto-fill from customer:</span>
-        <select onChange={e => {
-          const c = customers.find(x => x.id === parseInt(e.target.value));
-          if (c) setForm(f => ({...f, customerName:c.name, contactName:c.contactName, phone:c.phone, email:c.email, region:c.region, implementationType:c.implementationType}));
-        }} className="flex-1 bg-zinc-50 border border-zinc-200 rounded-lg px-3 py-1.5 text-xs focus:outline-none">
-          <option value="">— Select existing customer —</option>
-          {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
-      </div>
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp?: string;
+}
 
-      {/* Row 1 */}
-      <div className="grid grid-cols-3 gap-4">
-        <F label="Source" required><select required value={form.source||""} onChange={e=>setForm(f=>({...f,source:e.target.value}))} className={inp}>{SOURCES.map(s=><option key={s}>{s}</option>)}</select></F>
-        <F label="Region"><select value={form.region||""} onChange={e=>setForm(f=>({...f,region:e.target.value}))} className={inp}>{REGIONS.map(r=><option key={r}>{r}</option>)}</select></F>
-        <F label="Status" required><select required value={form.status||""} onChange={e=>setForm(f=>({...f,status:e.target.value}))} className={inp}>{LEAD_STATUSES.map(s=><option key={s}>{s}</option>)}</select></F>
-      </div>
-      <div className="grid grid-cols-3 gap-4">
-        <F label="Implementation Type" required><select required value={form.implementationType||""} onChange={e=>setForm(f=>({...f,implementationType:e.target.value}))} className={inp}>{IMPL_TYPES.map(t=><option key={t}>{t}</option>)}</select></F>
-        <F label="Price Details"><input value={form.priceDetails||""} onChange={e=>setForm(f=>({...f,priceDetails:e.target.value}))} placeholder="e.g. 450/unit" className={inp}/></F>
-        <F label="Project Value"><input value={form.projectValue||""} onChange={e=>setForm(f=>({...f,projectValue:e.target.value}))} placeholder="AED 0.00" className={inp}/></F>
-      </div>
+// --- Components ---
 
-      {/* Row 2: Customer Info */}
-      <div className="grid grid-cols-6 gap-4">
-        <div className="col-span-2"><F label="Company Name" required><input required value={form.customerName||""} onChange={e=>setForm(f=>({...f,customerName:e.target.value}))} placeholder="Company / Customer name" className={inp}/></F></div>
-        <F label="Contact Name" required><input required value={form.contactName||""} onChange={e=>setForm(f=>({...f,contactName:e.target.value}))} className={inp}/></F>
-        <F label="Phone" required><input required value={form.phone||""} onChange={e=>setForm(f=>({...f,phone:e.target.value}))} placeholder="+971..." className={inp}/></F>
-        <F label="Email"><input type="email" value={form.email||""} onChange={e=>setForm(f=>({...f,email:e.target.value}))} className={inp}/></F>
-        <F label="Designation"><input value={form.designation||""} onChange={e=>setForm(f=>({...f,designation:e.target.value}))} className={inp}/></F>
+const StatCard = ({ label, value, icon: Icon, color, subValue }: { label: string, value: string | number, icon: any, color: string, subValue?: string }) => (
+  <div className="bg-white border border-zinc-200 p-6 rounded-xl flex flex-col gap-3 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden group">
+    <div className="flex items-center justify-between">
+      <div className="p-2.5 rounded-lg bg-zinc-50 border border-zinc-100">
+        <Icon size={18} className="text-zinc-600" />
       </div>
-
-      {/* Row 3: Location */}
-      <div className="grid grid-cols-4 gap-4">
-        <div className="col-span-2"><F label="Address"><input value={form.address||""} onChange={e=>setForm(f=>({...f,address:e.target.value}))} className={inp}/></F></div>
-        <F label="Map Link"><input value={form.mapLink||""} onChange={e=>setForm(f=>({...f,mapLink:e.target.value}))} placeholder="https://maps.google.com/..." className={inp}/></F>
-        <F label="Coordinates"><input value={form.coordinates||""} onChange={e=>setForm(f=>({...f,coordinates:e.target.value}))} placeholder="25.2048, 55.2708" className={inp}/></F>
-      </div>
-
-      {/* Row 4: Sales */}
-      <div className="grid grid-cols-3 gap-4">
-        <F label="Sales Person" required><select required value={form.salesPerson||""} onChange={e=>setForm(f=>({...f,salesPerson:e.target.value}))} className={inp}><option value="">Select...</option>{SALES_PEOPLE.map(p=><option key={p}>{p}</option>)}</select></F>
-        <F label="Sales Type" required><select required value={form.salesType||""} onChange={e=>setForm(f=>({...f,salesType:e.target.value}))} className={inp}>{SALES_TYPES.map(t=><option key={t}>{t}</option>)}</select></F>
-        <F label="Requested By" required><select required value={form.requestedPerson||""} onChange={e=>setForm(f=>({...f,requestedPerson:e.target.value}))} className={inp}><option value="">Select...</option>{REQ_PEOPLE.map(p=><option key={p}>{p}</option>)}</select></F>
-      </div>
-
-      {/* Row 5: Quantities */}
-      <div className="bg-zinc-50 rounded-xl p-4 border border-zinc-200">
-        <div className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-3">Unit Quantities — Total: <span className="text-teal-600">{total}</span></div>
-        <div className="grid grid-cols-5 gap-3">
-          {[["New","newQty"],["Migrate","migrateQty"],["Trading","tradingQty"],["Service","serviceQty"],["Other","otherQty"]].map(([l,k])=>(
-            <div key={k} className="text-center">
-              <div className="text-[9px] font-bold text-zinc-500 uppercase mb-1">{l}</div>
-              <input type="number" min="0" value={form[k]||0} onChange={e=>setForm(f=>({...f,[k]:parseInt(e.target.value)||0}))} className="w-full bg-white border border-zinc-200 rounded-lg py-2 text-center text-sm font-bold text-zinc-700 focus:outline-none focus:border-teal-500/50"/>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Accessories + Comment */}
-      <div className="grid grid-cols-2 gap-4">
-        <F label="Accessories"><input value={form.accessories||""} onChange={e=>setForm(f=>({...f,accessories:e.target.value}))} placeholder="e.g. Panic button x10" className={inp}/></F>
-        <F label="Comment"><input value={form.comment||""} onChange={e=>setForm(f=>({...f,comment:e.target.value}))} className={inp}/></F>
-      </div>
-
-      <div className="flex justify-end pt-2">
-        <button type="submit" className="bg-teal-600 hover:bg-teal-700 text-white font-bold px-8 py-2.5 rounded-xl text-xs uppercase tracking-widest shadow-lg shadow-teal-600/20 transition-all flex items-center gap-2">
-          <Icons.Check />{submitLabel}
-        </button>
-      </div>
-    </form>
-  );
-};
-
-// ─── SERVICE TICKET FORM ──────────────────────────────────────────────────────
-const TicketFormBody = ({ form, setForm, customers, onSubmit, submitLabel = "CREATE TICKET" }) => (
-  <form onSubmit={onSubmit} className="space-y-5">
-    <div className="grid grid-cols-2 gap-4">
-      <F label="Company / Customer Name" required>
-        <input required list="cust-list-t" value={form.customerName||""} onChange={e=>setForm(f=>({...f,customerName:e.target.value}))} className={inp}/>
-        <datalist id="cust-list-t">{customers.map(c=><option key={c.id} value={c.name}/>)}</datalist>
-      </F>
-      <F label="Ticket Status"><select value={form.status||"New"} onChange={e=>setForm(f=>({...f,status:e.target.value}))} className={inp}>{TICKET_STATUSES.map(s=><option key={s}>{s}</option>)}</select></F>
-      <F label="Issue Type"><select value={form.issueType||""} onChange={e=>setForm(f=>({...f,issueType:e.target.value}))} className={inp}><option value="">Select issue type...</option>{ISSUE_TYPES.map(i=><option key={i}>{i}</option>)}</select></F>
-      <F label="Quantity"><input type="number" min="1" value={form.quantity||1} onChange={e=>setForm(f=>({...f,quantity:parseInt(e.target.value)||1}))} className={inp}/></F>
-      <F label="Assignee / Technician"><select value={form.assignee||""} onChange={e=>setForm(f=>({...f,assignee:e.target.value}))} className={inp}><option value="">Unassigned</option>{TECHNICIANS.map(t=><option key={t}>{t}</option>)}</select></F>
-      <F label="Requested By"><select value={form.requestedPerson||""} onChange={e=>setForm(f=>({...f,requestedPerson:e.target.value}))} className={inp}><option value="">Select...</option>{REQ_PEOPLE.map(p=><option key={p}>{p}</option>)}</select></F>
-      <F label="Payment"><select value={form.payment||PAY_OPTIONS[0]} onChange={e=>setForm(f=>({...f,payment:e.target.value}))} className={inp}>{PAY_OPTIONS.map(o=><option key={o}>{o}</option>)}</select></F>
-      <F label="Amount (AED)"><input value={form.amount||""} onChange={e=>setForm(f=>({...f,amount:e.target.value}))} placeholder="AED 0.00" className={inp}/></F>
-      <F label="Invoice Status"><select value={form.invoiceStatus||INV_STATUSES[0]} onChange={e=>setForm(f=>({...f,invoiceStatus:e.target.value}))} className={inp}>{INV_STATUSES.map(s=><option key={s}>{s}</option>)}</select></F>
-      <F label="Payment Status"><select value={form.paymentStatus||PAY_STATUSES[0]} onChange={e=>setForm(f=>({...f,paymentStatus:e.target.value}))} className={inp}>{PAY_STATUSES.map(s=><option key={s}>{s}</option>)}</select></F>
+      {subValue && <span className="text-[10px] font-bold text-teal-accent uppercase tracking-wider">{subValue}</span>}
     </div>
-    <F label="Description / Issue Details" required>
-      <textarea required rows={3} value={form.description||""} onChange={e=>setForm(f=>({...f,description:e.target.value}))} placeholder="Describe the issue, vehicle numbers, location, etc." className={cn(inp,"resize-none")}/>
-    </F>
-    <div className="flex justify-end">
-      <button type="submit" className="bg-zinc-900 hover:bg-zinc-700 text-white font-bold px-8 py-2.5 rounded-xl text-xs uppercase tracking-widest shadow-lg transition-all flex items-center gap-2">
-        <Icons.Ticket />{submitLabel}
-      </button>
+    <div>
+      <div className="text-2xl font-bold text-zinc-900">{value}</div>
+      <div className="text-xs font-medium text-zinc-500 mt-0.5">{label}</div>
     </div>
-  </form>
+  </div>
 );
 
-// ─── CHAT INTERFACE ───────────────────────────────────────────────────────────
-const SynoAIChat = ({ db, setDb }) => {
-  const [messages, setMessages] = useState([{role:"assistant", content:"👋 Hey! I'm **SynoHub AI Assistant** — your fleet operations brain.\n\nI can help you:\n• 📋 Create & manage leads and service tickets\n• 🔍 Query your customer database\n• 👨‍🔧 Assign technicians to tickets\n• 📊 Get operational analytics\n• 🚗 Track GPS & device issues\n\nJust type naturally — WhatsApp style is fine!", ts: Date.now()}]);
+
+
+const ChatInterface = ({ onRecordSaved }: { onRecordSaved?: (savedRecord?: any) => void }) => {
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const scrollRef = useRef(null);
-  const inputRef = useRef(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => { if(scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [messages]);
+  useEffect(() => {
+    fetchHistory();
+  }, []);
 
-  const buildSystemPrompt = () => {
-    const custSummary = db.customers.map(c=>`  - ID:${c.id} | ${c.name} | Contact: ${c.contactName} | Phone: ${c.phone} | Region: ${c.region} | Vehicles: ${c.vehicleCount} | Type: ${c.implementationType}`).join("\n");
-    const leadSummary = db.leads.map(l=>`  - ID:${l.id} | ${l.customerName} | Status: ${l.status} | Region: ${l.region} | Sales: ${l.salesPerson} | Qty: ${(l.newQty||0)+(l.migrateQty||0)} | Comment: ${l.comment||""}`).join("\n");
-    const svcSummary = db.services.map(s=>`  - ID:${s.id} | ${s.ticketId} | ${s.customerName} | Status: ${s.status} | Assignee: ${s.assignee||"Unassigned"} | Issue: ${s.description?.substring(0,60)}`).join("\n");
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages]);
 
-    return `You are SynoHub AI Assistant, an intelligent fleet and service management chatbot for Synosys Fleet Intelligence, Dubai UAE.
-
-LIVE DATABASE CONTEXT:
-=== CUSTOMERS (${db.customers.length} records) ===
-${custSummary || "  (empty)"}
-
-=== LEAD REGISTRATIONS (${db.leads.length} records) ===
-${leadSummary || "  (empty)"}
-
-=== SERVICE TICKETS (${db.services.length} records) ===
-${svcSummary || "  (empty)"}
-
-Available technicians: ${TECHNICIANS.join(", ")}
-Sales people: ${SALES_PEOPLE.join(", ")}
-Regions: ${REGIONS.join(", ")}
-Issue types: ${ISSUE_TYPES.join(", ")}
-
-YOUR CAPABILITIES:
-1. DATABASE QUERIES: Answer questions about existing data — counts, summaries, who has what, pending tickets, etc. Answer factually from the data above.
-2. CREATE RECORDS: When user wants to create a lead or service ticket, extract details and output a JSON trigger block on its own line.
-3. UPDATE RECORDS: When user wants to update status/assignee/field, output update trigger.
-4. ANALYTICS: Summarize operations, flag issues, find patterns.
-5. CONVERSATIONAL: Handle greetings, general fleet ops questions, abbreviations like "bro tracker not working", "urvan offline", "assign tech", etc.
-
-INTENT DETECTION:
-- "create/add/new lead/registration" → create_lead
-- "create/new/log ticket/service/complaint/issue" → create_service  
-- "update/change/mark/set" → update_record
-- "assign/give to" → assign_technician
-- "how many/count/total/which/who/show me/list" → db_query
-- greetings → respond warmly
-
-FOLLOW-UP: If key info is missing for record creation, ask concisely. Don't hallucinate data.
-
-RESPONSE FORMAT:
-- Be concise and operational
-- Use markdown: **bold**, bullet points
-- For record creation, end your message with a JSON block on its own line:
-  [[SAVE_LEAD:{"customerName":"","contactName":"","phone":"","email":"","region":"","source":"","status":"New Lead","implementationType":"","salesPerson":"","salesType":"New","requestedPerson":"","comment":"","newQty":0,"migrateQty":0}]]
-  OR
-  [[SAVE_SERVICE:{"customerName":"","description":"","status":"New","quantity":1,"assignee":"","requestedPerson":"","payment":"Not Applicable","amount":""}]]
-  OR
-  [[UPDATE_LEAD:{"id":X,"data":{...fields}}]]
-  OR
-  [[UPDATE_SERVICE:{"id":X,"data":{...fields}}]]
-
-For typos and messy input: "urvan 23543 offline" = vehicle tracking issue; "bro no gps" = GPS complaint; "need locator support abu dhabi" = new service request in Abu Dhabi.`;
+  const fetchHistory = async () => {
+    try {
+      const res = await axios.get("/api/chat/history");
+      setMessages(res.data);
+    } catch (e) {
+      console.error("Failed to fetch chat history", e);
+    }
   };
 
   const handleSend = async () => {
     if (!input.trim() || loading) return;
-    const userMsg = input.trim();
+    const userMsg = input;
     setInput("");
-    const newMsg = { role:"user", content:userMsg, ts:Date.now() };
-    setMessages(prev => [...prev, newMsg]);
+    setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
     setLoading(true);
 
     try {
-      const history = messages.slice(-8).map(m => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }));
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({
-          model:"claude-sonnet-4-20250514",
-          max_tokens:1000,
-          system: buildSystemPrompt(),
-          messages: [...history, { role:"user", content:userMsg }]
-        })
-      });
-      const data = await res.json();
-      const reply = data.content?.[0]?.text || "Sorry, I couldn't process that. Please try again.";
-
-      // Parse and execute triggers
-      const saveLeadMatch = reply.match(/\[\[SAVE_LEAD:(\{[\s\S]*?\})\]\]/);
-      const saveSvcMatch = reply.match(/\[\[SAVE_SERVICE:(\{[\s\S]*?\})\]\]/);
-      const updateLeadMatch = reply.match(/\[\[UPDATE_LEAD:(\{[\s\S]*?\})\]\]/);
-      const updateSvcMatch = reply.match(/\[\[UPDATE_SERVICE:(\{[\s\S]*?\})\]\]/);
-
-      let notification = null;
-
-      if (saveLeadMatch) {
-        try {
-          const rec = JSON.parse(saveLeadMatch[1]);
-          const newId = Math.max(0, ...db.leads.map(l=>l.id)) + 1;
-          const newLead = { ...defaultLead(), ...rec, id: newId, createdAt: new Date().toISOString().split('T')[0] };
-          setDb(prev => ({ ...prev, leads: [...prev.leads, newLead] }));
-          notification = "✅ Lead record saved to database!";
-        } catch(e) { notification = "⚠️ Could not parse lead record."; }
+      const history = messages.slice(-5).map(m => ({ role: m.role, content: m.content }));
+      const res = await axios.post("/api/chat", { message: userMsg, history });
+      setMessages(prev => [...prev, { role: 'assistant', content: res.data.reply }]);
+      if (onRecordSaved) {
+        onRecordSaved(res.data.savedRecord);
       }
-      if (saveSvcMatch) {
-        try {
-          const rec = JSON.parse(saveSvcMatch[1]);
-          const newId = Math.max(0, ...db.services.map(s=>s.id)) + 1;
-          const newSvc = { ...defaultTicket(), ...rec, id: newId, ticketId:`SVC-${String(newId).padStart(3,'0')}`, invoiceStatus:"Not Invoiced", paymentStatus:"Not Paid", createdAt: new Date().toISOString().split('T')[0] };
-          setDb(prev => ({ ...prev, services: [...prev.services, newSvc] }));
-          notification = "✅ Service ticket created!";
-        } catch(e) { notification = "⚠️ Could not parse ticket."; }
-      }
-      if (updateLeadMatch) {
-        try {
-          const { id, data: upd } = JSON.parse(updateLeadMatch[1]);
-          setDb(prev => ({ ...prev, leads: prev.leads.map(l => l.id === id ? {...l,...upd} : l) }));
-          notification = `✅ Lead #${id} updated!`;
-        } catch(e) {}
-      }
-      if (updateSvcMatch) {
-        try {
-          const { id, data: upd } = JSON.parse(updateSvcMatch[1]);
-          setDb(prev => ({ ...prev, services: prev.services.map(s => s.id === id ? {...s,...upd} : s) }));
-          notification = `✅ Ticket #${id} updated!`;
-        } catch(e) {}
-      }
-
-      // Clean reply of trigger blocks
-      const cleanReply = reply.replace(/\[\[SAVE_LEAD:[\s\S]*?\]\]/g,"").replace(/\[\[SAVE_SERVICE:[\s\S]*?\]\]/g,"").replace(/\[\[UPDATE_LEAD:[\s\S]*?\]\]/g,"").replace(/\[\[UPDATE_SERVICE:[\s\S]*?\]\]/g,"").trim();
-
-      setMessages(prev => [...prev, { role:"assistant", content: cleanReply + (notification ? `\n\n${notification}` : ""), ts:Date.now() }]);
-    } catch(e) {
-      setMessages(prev => [...prev, { role:"assistant", content:"⚠️ Network issue. Please check connection and retry.", ts:Date.now() }]);
+    } catch (e) {
+      setMessages(prev => [...prev, { role: 'assistant', content: "I'm experiencing high traffic. Please try again in 30s." }]);
     } finally {
       setLoading(false);
-      setTimeout(() => inputRef.current?.focus(), 100);
     }
   };
 
-  const QUICK = [
-    "How many service tickets are pending?",
-    "Show all customers in Dubai",
-    "Which technician is assigned to the most tickets?",
-    "Create a GPS offline complaint for Emirates Freight",
-    "Assign Athul to ticket SVC-002",
-    "What leads are in Proposed status?",
-  ];
-
-  const renderMsg = (content) => {
-    // Simple markdown: **bold**, bullet points, line breaks
-    const lines = content.split('\n');
-    return lines.map((line, i) => {
-      const parts = line.split(/\*\*(.*?)\*\*/g);
-      const rendered = parts.map((p, j) => j % 2 === 1 ? <strong key={j}>{p}</strong> : p);
-      if (line.startsWith('• ') || line.startsWith('- ')) return <div key={i} className="flex gap-1.5"><span className="text-teal-500 shrink-0">•</span><span>{rendered.map((p,j)=>j%2===1?<strong key={j}>{p}</strong>:p)}</span></div>;
-      return <div key={i} className={line === '' ? 'h-2' : ''}>{rendered}</div>;
-    });
+  const handlePresetClick = async (promptText: string) => {
+    if (loading) return;
+    setMessages(prev => [...prev, { role: 'user', content: promptText }]);
+    setLoading(true);
+    try {
+      const history = messages.slice(-5).map(m => ({ role: m.role, content: m.content }));
+      const res = await axios.post("/api/chat", { message: promptText, history });
+      setMessages(prev => [...prev, { role: 'assistant', content: res.data.reply }]);
+      if (onRecordSaved) {
+        onRecordSaved(res.data.savedRecord);
+      }
+    } catch (e) {
+      setMessages(prev => [...prev, { role: 'assistant', content: "I'm experiencing high traffic. Please try again in 30s." }]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-120px)] max-w-4xl mx-auto">
-      {/* Header */}
-      <div className="bg-gradient-to-r from-teal-600 to-teal-700 rounded-t-2xl px-6 py-4 flex items-center gap-4">
-        <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center">
-          <Icons.Bot />
-        </div>
-        <div>
-          <div className="font-bold text-white text-sm">SynoHub AI Assistant</div>
-          <div className="text-teal-200 text-[10px] flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-teal-300 animate-pulse"/>
-            Fleet Intelligence · Cog-Ops Neural Link · {db.leads.length} leads · {db.services.length} tickets · {db.customers.length} customers
-          </div>
-        </div>
-      </div>
-
-      {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto bg-zinc-50 p-4 space-y-4 border-x border-zinc-200">
-        {messages.map((m, i) => (
-          <motion.div key={i} initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className={cn("flex", m.role==="user" ? "justify-end" : "justify-start")}>
-            {m.role === "assistant" && (
-              <div className="w-7 h-7 rounded-full bg-teal-600 flex items-center justify-center shrink-0 mr-2 mt-1">
-                <Icons.Zap />
+    <div className="max-w-4xl mx-auto px-4">
+      {/* Primary Chat Area */}
+      <div className="flex flex-col h-[700px] border border-zinc-200 rounded-2xl overflow-hidden bg-white shadow-lg">
+        {/* Header */}
+        <div className="p-4 border-b border-zinc-100 bg-zinc-50/80 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-full bg-teal-accent/10 flex items-center justify-center">
+              <Zap size={16} className="text-teal-accent" />
+            </div>
+            <div>
+              <div className="text-sm font-bold text-zinc-800">SynoHub AI Assistant</div>
+              <div className="text-[10px] text-zinc-500 uppercase tracking-widest flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-teal-accent animate-pulse" /> Cog-Ops Neural Link
               </div>
-            )}
-            <div className={cn(
-              "max-w-[80%] rounded-2xl px-4 py-3 text-xs leading-relaxed space-y-0.5",
-              m.role==="user" ? "bg-zinc-800 text-white rounded-br-none" : "bg-white text-zinc-700 border border-zinc-100 shadow-sm rounded-bl-none"
-            )}>
-              {renderMsg(m.content)}
-            </div>
-          </motion.div>
-        ))}
-        {loading && (
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-full bg-teal-600 flex items-center justify-center"><Icons.Zap /></div>
-            <div className="bg-white border border-zinc-100 rounded-2xl rounded-bl-none px-4 py-3 flex gap-1.5 shadow-sm">
-              {[0,150,300].map(d=><div key={d} className="w-1.5 h-1.5 rounded-full bg-teal-500 animate-bounce" style={{animationDelay:`${d}ms`}}/>)}
             </div>
           </div>
-        )}
-      </div>
+        </div>
 
-      {/* Quick prompts */}
-      <div className="bg-white border-x border-zinc-200 px-4 py-2 flex gap-2 overflow-x-auto">
-        {QUICK.map((q,i) => (
-          <button key={i} onClick={() => { setInput(q); inputRef.current?.focus(); }} className="shrink-0 bg-zinc-50 hover:bg-teal-50 hover:text-teal-700 border border-zinc-200 hover:border-teal-200 rounded-full px-3 py-1 text-[10px] font-medium text-zinc-500 transition-all whitespace-nowrap">
-            {q}
-          </button>
-        ))}
-      </div>
+        {/* Messages */}
+        <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-hide bg-zinc-50/30">
+          {messages.length === 0 && (
+            <div className="h-full flex flex-col items-center justify-center text-zinc-400 text-center p-8 space-y-4">
+               <MessageSquare size={44} className="opacity-15 text-teal-accent" />
+               <div className="text-xs font-medium text-zinc-500 max-w-[280px]">
+                 Hi there! Ask any query to start a streamlined operational conversation.
+               </div>
+            </div>
+          )}
+          {messages.map((m, idx) => (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              key={`msg-${idx}`}
+              className={cn(
+                "flex flex-col max-w-[85%] gap-1.5",
+                m.role === 'user' ? "ml-auto items-end" : "mr-auto items-start"
+              )}
+            >
+              <div className={cn(
+                "p-4 rounded-2xl text-xs leading-relaxed shadow-sm",
+                m.role === 'user' 
+                  ? "bg-zinc-800 text-white rounded-br-none" 
+                  : "bg-white text-zinc-700 rounded-bl-none border border-zinc-100"
+              )}>
+                {m.content}
+              </div>
+              <span className="text-[9px] text-zinc-400 uppercase tracking-tight px-1 font-bold">
+                {m.role === 'user' ? "You" : "SynoAI Officer"}
+              </span>
+            </motion.div>
+          ))}
+          {loading && (
+            <div className="flex gap-1.5 p-3.5 bg-white border border-zinc-100 w-fit rounded-2xl shadow-sm">
+              <div className="w-1.5 h-1.5 rounded-full bg-teal-accent animate-bounce [animation-delay:-0.3s]" />
+              <div className="w-1.5 h-1.5 rounded-full bg-teal-accent animate-bounce [animation-delay:-0.15s]" />
+              <div className="w-1.5 h-1.5 rounded-full bg-teal-accent animate-bounce" />
+            </div>
+          )}
+        </div>
 
-      {/* Input */}
-      <div className="bg-white border border-zinc-200 rounded-b-2xl p-3 flex gap-3 items-end">
-        <textarea
-          ref={inputRef}
-          rows={1}
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => { if(e.key==="Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }}}
-          placeholder="Type here... e.g. 'bro tracker not working', 'create locator request abu dhabi', 'assign athul to svc-002'"
-          className="flex-1 bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2.5 text-xs text-zinc-800 resize-none focus:outline-none focus:border-teal-500/50 transition-all leading-relaxed"
-          style={{minHeight:"40px", maxHeight:"120px"}}
-        />
-        <button onClick={handleSend} disabled={loading || !input.trim()} className="w-10 h-10 rounded-xl bg-teal-600 hover:bg-teal-700 disabled:opacity-30 disabled:cursor-not-allowed text-white flex items-center justify-center transition-all shrink-0">
-          <Icons.Send />
-        </button>
+        {/* Input Bar */}
+        <div className="p-4 bg-white border-t border-zinc-100">
+          <div className="relative">
+            <input 
+              type="text" 
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+              placeholder="Type your message..." 
+              className="w-full bg-zinc-50 border border-zinc-200 rounded-xl py-3.5 pl-4 pr-12 text-xs text-zinc-900 placeholder-zinc-400 focus:outline-none focus:border-teal-accent/50 transition-all font-medium"
+            />
+            <button 
+              onClick={handleSend}
+              disabled={loading || !input.trim()}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-2.5 text-zinc-400 hover:text-teal-accent disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              <Send size={16} />
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
 };
 
-// ─── STAT CARD ────────────────────────────────────────────────────────────────
-const StatCard = ({ label, value, icon: Icon, sub, color="teal" }) => (
-  <div className={cn("bg-white border border-zinc-200 rounded-2xl p-5 shadow-sm hover:shadow-md transition-shadow")}>
-    <div className="flex items-center justify-between mb-3">
-      <div className={cn("p-2 rounded-lg", color==="teal" ? "bg-teal-50" : color==="amber" ? "bg-amber-50" : "bg-zinc-50")}>
-        <Icon />
-      </div>
-      {sub && <span className={cn("text-[10px] font-bold uppercase tracking-wider", color==="teal"?"text-teal-600":color==="amber"?"text-amber-600":"text-zinc-500")}>{sub}</span>}
-    </div>
-    <div className="text-2xl font-bold text-zinc-900">{value}</div>
-    <div className="text-xs text-zinc-400 mt-0.5 font-medium">{label}</div>
-  </div>
-);
-
-// ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab] = useState("dashboard");
-  const [db, setDb] = useState({ customers: SEED_CUSTOMERS, leads: SEED_LEADS, services: SEED_SERVICES });
-  const [search, setSearch] = useState("");
+  const [activeTab, setActiveTab ] = useState<string>("overview");
+  const [data, setData] = useState<{ registrations: Registration[], services: ServiceTicket[], customers: Customer[] }>({ 
+    registrations: [], services: [], customers: [] 
+  });
+  const [loading, setLoading] = useState(true);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [filterRegion, setFilterRegion] = useState("All");
+  const [filterStatus, setFilterStatus] = useState("All");
+  const [isLeadModalOpen, setIsLeadModalOpen] = useState(false);
+  const [isTicketModalOpen, setIsTicketModalOpen] = useState(false);
+  const [showAllFeed, setShowAllFeed] = useState(false);
 
-  // New form state
-  const [newLeadForm, setNewLeadForm] = useState(defaultLead());
-  const [newTicketForm, setNewTicketForm] = useState(defaultTicket());
-  const [newFormMode, setNewFormMode] = useState("lead"); // "lead" | "ticket"
-  const [newFormSuccess, setNewFormSuccess] = useState(false);
-
-  // Existing form: search & select lead/ticket
-  const [existingSearch, setExistingSearch] = useState("");
-  const [existingType, setExistingType] = useState("lead");
-  const [selectedExisting, setSelectedExisting] = useState(null);
-  const [existingForm, setExistingForm] = useState(null);
-
-  // DB Manager
-  const [dbTab, setDbTab] = useState("leads");
+  // Data Manager States
+  const [dbTab, setDbTab] = useState<"leads" | "services" | "customers">("leads");
   const [dbSearch, setDbSearch] = useState("");
-  const [editItem, setEditItem] = useState(null);
+  const [dbRegion, setDbRegion] = useState("All");
+  const [editingItem, setEditingItem] = useState<{ type: 'lead' | 'service' | 'customer', data: any } | null>(null);
+  
+  // Custom states for existing lead select and visual notifications
+  const [selectedLeadId, setSelectedLeadId] = useState<number | null>(null);
+  const [notification, setNotification] = useState<{ message: string; type: "success" | "error" } | null>(null);
+  const [dbError, setDbError] = useState<{ error: string; details?: string; connectionConfig?: any } | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
 
-  // Modals
-  const [showNewLeadModal, setShowNewLeadModal] = useState(false);
-  const [showNewTicketModal, setShowNewTicketModal] = useState(false);
+  const showToast = (message: string, type: "success" | "error" = "success") => {
+    setNotification({ message, type });
+    setTimeout(() => {
+      setNotification(null);
+    }, 4500);
+  };
 
-  // ── CRUD ──
-  const saveLead = async (e) => {
-    e.preventDefault();
-    const newId = Math.max(0, ...db.leads.map(l=>l.id)) + 1;
-    const rec = { ...newLeadForm, id: newId, createdAt: new Date().toISOString().split('T')[0] };
-    setDb(prev => ({ ...prev, leads: [...prev.leads, rec] }));
-    setNewLeadForm(defaultLead());
-    setNewFormSuccess(true);
-    setTimeout(() => setNewFormSuccess(false), 3000);
+  const [leadForm, setLeadForm] = useState<Partial<Registration>>({
+    status: 'New Lead',
+    region: REGIONS[0],
+    implementationType: IMPLEMENTATION_TYPES[0],
+    salesPerson: SALES_PEOPLE[0],
+    salesType: SALES_TYPES[0],
+    source: SOURCES[0],
+    newQty: 0,
+    migrateQty: 0,
+    tradingQty: 0,
+    serviceQty: 0,
+    otherQty: 0,
+    customerName: "",
+    contactName: "",
+    phone: "",
+    email: "",
+    designation: "",
+    address: "",
+    mapLink: "",
+    coordinates: "",
+    comment: "",
+    projectValue: "",
+    priceDetails: "",
+    accessories: "",
+    requestedPerson: ""
+  });
+
+  const [ticketForm, setTicketForm] = useState<Partial<ServiceTicket>>({
+    status: 'New',
+    payment: PAYMENT_OPTIONS[0],
+    invoiceStatus: INVOICE_STATUSES[0],
+    paymentStatus: PAYMENT_STATUSES[0],
+    quantity: 1
+  });
+
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [showExistingSuggestions, setShowExistingSuggestions] = useState(false);
+
+  // Clear lead form state to pristine defaults
+  const resetLeadForm = () => {
+    setLeadForm({
+      status: 'New Lead',
+      region: REGIONS[0],
+      implementationType: IMPLEMENTATION_TYPES[0],
+      salesPerson: SALES_PEOPLE[0],
+      salesType: SALES_TYPES[0],
+      source: SOURCES[0],
+      newQty: 0,
+      migrateQty: 0,
+      tradingQty: 0,
+      serviceQty: 0,
+      otherQty: 0,
+      customerName: "",
+      contactName: "",
+      phone: "",
+      email: "",
+      designation: "",
+      address: "",
+      mapLink: "",
+      coordinates: "",
+      comment: "",
+      projectValue: "",
+      priceDetails: "",
+      accessories: "",
+      requestedPerson: ""
+    });
+    setSelectedLeadId(null);
+    setShowSuggestions(false);
   };
-  const saveTicket = async (e) => {
-    e.preventDefault();
-    const newId = Math.max(0, ...db.services.map(s=>s.id)) + 1;
-    const rec = { ...newTicketForm, id: newId, ticketId:`SVC-${String(newId).padStart(3,'0')}`, invoiceStatus:"Not Invoiced", paymentStatus:"Not Paid", createdAt: new Date().toISOString().split('T')[0] };
-    setDb(prev => ({ ...prev, services: [...prev.services, rec] }));
-    setNewTicketForm(defaultTicket());
-    setNewFormSuccess(true);
-    setTimeout(() => setNewFormSuccess(false), 3000);
-  };
-  const saveExisting = async (e) => {
-    e.preventDefault();
-    if (!selectedExisting) return;
-    if (existingType === "lead") {
-      setDb(prev => ({ ...prev, leads: prev.leads.map(l => l.id === existingForm.id ? existingForm : l) }));
-    } else {
-      setDb(prev => ({ ...prev, services: prev.services.map(s => s.id === existingForm.id ? existingForm : s) }));
+
+  // Safe reset when tab is switched
+  useEffect(() => {
+    if (activeTab === "new-form") {
+      resetLeadForm();
+    } else if (activeTab === "existing-form") {
+      if (!selectedLeadId) {
+        resetLeadForm();
+      }
     }
-    setNewFormSuccess(true);
-    setTimeout(() => setNewFormSuccess(false), 3000);
-  };
-  const deleteItem = (type, id) => {
-    if (!confirm("Delete this record?")) return;
-    if (type === "lead") setDb(prev => ({ ...prev, leads: prev.leads.filter(l=>l.id!==id) }));
-    else if (type === "service") setDb(prev => ({ ...prev, services: prev.services.filter(s=>s.id!==id) }));
-    else setDb(prev => ({ ...prev, customers: prev.customers.filter(c=>c.id!==id) }));
-    setEditItem(null);
-  };
-  const saveEditItem = (e) => {
+  }, [activeTab]);
+
+  // Sync leadForm with selectedLeadId from DB registrations dynamically
+  useEffect(() => {
+    if (selectedLeadId && data.registrations.length > 0) {
+      const selectedReg = data.registrations.find(r => r.id === selectedLeadId);
+      if (selectedReg) {
+        setLeadForm({
+          status: selectedReg.status || 'New Lead',
+          region: selectedReg.region || REGIONS[0],
+          implementationType: selectedReg.implementationType || IMPLEMENTATION_TYPES[0],
+          salesPerson: selectedReg.salesPerson || SALES_PEOPLE[0],
+          salesType: selectedReg.salesType || SALES_TYPES[0],
+          source: selectedReg.source || SOURCES[0],
+          newQty: selectedReg.newQty || 0,
+          migrateQty: selectedReg.migrateQty || 0,
+          tradingQty: selectedReg.tradingQty || 0,
+          serviceQty: selectedReg.serviceQty || 0,
+          otherQty: selectedReg.otherQty || 0,
+          customerName: selectedReg.customerName || "",
+          contactName: selectedReg.contactName || "",
+          phone: selectedReg.phone || "",
+          email: selectedReg.email || "",
+          designation: selectedReg.designation || "",
+          address: selectedReg.address || "",
+          mapLink: selectedReg.mapLink || "",
+          coordinates: selectedReg.coordinates || "",
+          comment: selectedReg.comment || "",
+          projectValue: selectedReg.projectValue || "",
+          priceDetails: selectedReg.priceDetails || "",
+          accessories: selectedReg.accessories || "",
+          requestedPerson: selectedReg.requestedPerson || ""
+        });
+      }
+    }
+  }, [selectedLeadId, data.registrations]);
+
+  const handleLeadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (editItem.type === "lead") setDb(prev => ({ ...prev, leads: prev.leads.map(l => l.id===editItem.data.id ? editItem.data : l) }));
-    else if (editItem.type === "service") setDb(prev => ({ ...prev, services: prev.services.map(s => s.id===editItem.data.id ? editItem.data : s) }));
-    else setDb(prev => ({ ...prev, customers: prev.customers.map(c => c.id===editItem.data.id ? editItem.data : c) }));
-    setEditItem(null);
+    try {
+      if (activeTab === "existing-form" && selectedLeadId) {
+        // Update database with existing lead record
+        await axios.put(`/api/leads/${selectedLeadId}`, leadForm);
+        showToast("Lead configuration updated in database and synchronized with Customers successfully!");
+      } else {
+        // Create brand-new lead registration in database
+        await axios.post("/api/leads/new", leadForm);
+        showToast("Lead registration created in database and synchronized with Customers successfully!");
+      }
+      setIsLeadModalOpen(false);
+      fetchData();
+      resetLeadForm();
+    } catch (err) {
+      console.error("Submit error details:", err);
+      showToast("Could not submit lead details. Please inspect constraints and connection.", "error");
+    }
   };
 
-  const nav = [
-    { id:"dashboard", label:"Dashboard", icon:Icons.Dashboard },
-    { id:"new-form", label:"New Form", icon:Icons.Plus },
-    { id:"existing-form", label:"Existing Form", icon:Icons.Edit },
-    { id:"ai", label:"SynoAI Chat", icon:Icons.Bot },
-    { id:"db-manager", label:"Data Manager", icon:Icons.DB },
+  const handleSelectCustomer = (cust: Customer) => {
+    if (activeTab === "new-form") {
+      setLeadForm(prev => ({
+        ...prev,
+        customerName: cust.name,
+        contactName: cust.contactName || prev.contactName || "",
+        phone: cust.phone || prev.phone || "",
+        email: cust.email || prev.email || "",
+        region: cust.region || prev.region || REGIONS[0],
+        implementationType: cust.implementationType || prev.implementationType || IMPLEMENTATION_TYPES[0]
+      }));
+      showToast(`Populated "New Form" with details for: ${cust.name}`);
+    } else if (activeTab === "existing-form") {
+      const matchingReg = data.registrations.find(r => r.customerName.toLowerCase() === cust.name.toLowerCase());
+      if (matchingReg) {
+        setSelectedLeadId(matchingReg.id);
+        showToast(`Loaded existing Lead ID #${matchingReg.id} for: ${cust.name}`);
+      } else {
+        setSelectedLeadId(null);
+        setLeadForm(prev => ({
+          ...prev,
+          customerName: cust.name,
+          contactName: cust.contactName || "",
+          phone: cust.phone || "",
+          email: cust.email || "",
+          region: cust.region || REGIONS[0],
+          implementationType: cust.implementationType || IMPLEMENTATION_TYPES[0],
+          source: "Company Lead",
+          status: "New Lead",
+          requestedPerson: "",
+          salesType: "New"
+        }));
+        showToast(`No lead found. Ready to create a new lead for customer: ${cust.name}`);
+      }
+    }
+  };
+
+  const handleTicketSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await axios.post("/api/services", ticketForm);
+      setIsTicketModalOpen(false);
+      fetchData();
+      showToast(`Service ticket created successfully!`);
+      setTicketForm({ status: 'New', payment: PAYMENT_OPTIONS[0], invoiceStatus: INVOICE_STATUSES[0], paymentStatus: PAYMENT_STATUSES[0], quantity: 1 });
+    } catch (err) {
+      showToast("Failed to create service ticket", "error");
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(fetchData, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const fetchData = async () => {
+    try {
+      const res = await axios.get("/api/data");
+      setData(res.data);
+      setDbError(null);
+    } catch (e: any) {
+      console.error("Data fetch failed", e);
+      if (e.response && e.response.data) {
+        setDbError(e.response.data);
+      } else {
+        setDbError({ 
+          error: e.message || "Unknown database connection error",
+          details: "Could not reach database API endpoint." 
+        });
+      }
+      // Populate with empty datasets if database fetch fails
+      setData({
+        registrations: [],
+        services: [],
+        customers: []
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const filteredRegistrations = data.registrations.filter(reg => {
+    const matchesSearch = reg.customerName.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                         reg.contactName?.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesRegion = filterRegion === "All" || reg.region === filterRegion;
+    const matchesStatus = filterStatus === "All" || reg.status === filterStatus;
+    return matchesSearch && matchesRegion && matchesStatus;
+  });
+
+  const filteredServices = data.services.filter(svc => {
+    const matchesSearch = svc.customerName.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                         svc.ticketId.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesStatus = filterStatus === "All" || svc.status === filterStatus;
+    return matchesSearch && matchesStatus;
+  });
+
+  const filteredCustomers = data.customers.filter(cust => 
+    cust.name.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+
+  const navItems = [
+    { id: "overview", label: "Dashboard", icon: LayoutDashboard },
+    { id: "new-form", label: "New Form", icon: Plus },
+    { id: "existing-form", label: "Existing Form", icon: ClipboardList },
+    { id: "ai", label: "SynoAI Chat", icon: Sparkles },
   ];
 
-  const pendingTickets = db.services.filter(s=>s.status==="New"||s.status==="Hold").length;
-  const wonLeads = db.leads.filter(l=>l.status==="Won").length;
-
   return (
-    <div className="flex h-screen bg-slate-50 font-sans text-zinc-800">
-      {/* ── SIDEBAR ── */}
-      <aside className="w-60 bg-white border-r border-zinc-200 flex flex-col shadow-sm z-20">
-        <div className="px-6 py-6 border-b border-zinc-100">
+    <div className="flex h-screen bg-[#F8FAFC] text-zinc-700 font-sans selection:bg-[#00ADC6]/20 relative">
+      {/* Toast Notification Container */}
+      <AnimatePresence>
+        {notification && (
+          <motion.div
+            initial={{ opacity: 0, y: -25, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -25, scale: 0.98 }}
+            className={cn(
+              "fixed top-6 right-6 z-50 flex items-center gap-3 px-5 py-3.5 rounded-xl shadow-2xl border text-xs font-semibold backdrop-blur-md max-w-md",
+              notification.type === "success" 
+                ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-600" 
+                : "bg-rose-500/10 border-rose-500/20 text-rose-600"
+            )}
+          >
+            <CheckCircle2 size={16} className={cn(notification.type === "success" ? "text-emerald-500" : "text-rose-500")} />
+            <span>{notification.message}</span>
+            <button onClick={() => setNotification(null)} className="ml-3 hover:opacity-75 transition-opacity text-zinc-400">
+              <X size={14} />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Sidebar */}
+      <aside className="w-64 border-r border-zinc-200 bg-white flex flex-col pt-8 shadow-sm z-30">
+        <div className="px-8 mb-10 group cursor-pointer">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-teal-600 flex items-center justify-center shadow-lg shadow-teal-600/30">
-              <Icons.Shield />
-            </div>
-            <div>
-              <div className="font-black text-zinc-900 text-base tracking-tight">SynoHub</div>
-              <div className="text-[9px] text-zinc-400 font-bold uppercase tracking-widest">Fleet Intelligence</div>
-            </div>
+             <div className="w-9 h-9 rounded-lg bg-teal-accent flex items-center justify-center shadow-lg shadow-teal-accent/20 transition-transform group-hover:scale-105">
+               <Shield className="text-white" strokeWidth={2.5} size={18} />
+             </div>
+             <div>
+               <h1 className="text-zinc-900 font-bold tracking-tight text-lg">SynoHub</h1>
+               <p className="text-[10px] text-zinc-400 font-bold uppercase tracking-widest">Fleet Intelligence</p>
+             </div>
           </div>
         </div>
 
-        <nav className="flex-1 p-3 space-y-0.5">
-          {nav.map(item => (
-            <button key={item.id} onClick={() => setTab(item.id)} className={cn(
-              "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-bold transition-all",
-              tab===item.id ? "bg-teal-600 text-white shadow-md shadow-teal-600/20" : "text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100"
-            )}>
-              <item.icon />
+        <nav className="flex-1 px-4 space-y-0.5">
+          {navItems.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => {
+                setActiveTab(item.id);
+                setFilterStatus("All");
+                setFilterRegion("All");
+              }}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-xs font-bold transition-all",
+                activeTab === item.id 
+                  ? "bg-teal-accent text-white shadow-md shadow-teal-accent/20" 
+                  : "text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100"
+              )}
+            >
+              <item.icon size={16} className={cn(activeTab === item.id ? "text-white" : "text-zinc-400")} />
               {item.label}
-              {item.id==="ai" && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-teal-400 animate-pulse"/>}
             </button>
           ))}
         </nav>
 
-        <div className="p-4 border-t border-zinc-100">
-          <div className="bg-teal-50 rounded-xl p-3 border border-teal-100">
-            <div className="text-[9px] font-bold text-teal-600 uppercase tracking-widest mb-1">Live DB Stats</div>
-            <div className="space-y-1 text-[10px] text-zinc-600">
-              <div className="flex justify-between"><span>Leads</span><span className="font-bold">{db.leads.length}</span></div>
-              <div className="flex justify-between"><span>Tickets</span><span className="font-bold">{db.services.length}</span></div>
-              <div className="flex justify-between"><span>Customers</span><span className="font-bold">{db.customers.length}</span></div>
-            </div>
-          </div>
+        <div className="p-6">
+           <div className="bg-zinc-50 rounded-xl p-4 border border-zinc-100">
+              <div className="flex items-center gap-2 mb-2">
+                 <div className="w-1.5 h-1.5 rounded-full bg-teal-accent animate-pulse" />
+                 <span className="text-[9px] text-zinc-500 font-bold uppercase tracking-widest">v2.4 Stable</span>
+              </div>
+              <p className="text-[10px] text-zinc-500 leading-tight">All systems operational.</p>
+           </div>
         </div>
       </aside>
 
-      {/* ── MAIN ── */}
-      <main className="flex-1 overflow-y-auto">
-        {/* Header */}
-        <header className="sticky top-0 z-10 bg-white/80 backdrop-blur-md border-b border-zinc-200 px-8 py-4 flex items-center justify-between">
-          <h2 className="font-black text-zinc-900 text-base capitalize">{nav.find(n=>n.id===tab)?.label}</h2>
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <Icons.Search />
-              <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Global search..." className="bg-zinc-50 border border-zinc-200 rounded-xl py-2 pl-8 pr-4 text-xs font-medium focus:outline-none focus:border-teal-500/30 w-56 absolute right-0 top-1/2 -translate-y-1/2 opacity-0 focus:opacity-100 transition-all"/>
+      {/* Main Content */}
+      <main className="flex-1 overflow-y-auto relative flex flex-col">
+        <header className="sticky top-0 z-20 bg-white/80 backdrop-blur-md border-b border-zinc-200 px-10 py-6 flex items-center justify-between shadow-sm">
+            <div>
+              <h2 className="text-lg font-bold text-zinc-900 capitalize tracking-tight flex items-center gap-3">
+                {activeTab}
+                <span className="h-4 w-px bg-zinc-200" />
+                <span className="text-[10px] text-zinc-400 font-medium">Synced {new Date().toLocaleTimeString()}</span>
+              </h2>
             </div>
-            <button onClick={() => { setShowNewLeadModal(true); }} className="bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold px-4 py-2 rounded-xl flex items-center gap-2 shadow-md shadow-teal-600/20 transition-all">
-              <Icons.Plus /><span>New Lead</span>
-            </button>
-            <button onClick={() => { setShowNewTicketModal(true); }} className="bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-bold px-4 py-2 rounded-xl flex items-center gap-2 transition-all">
-              <Icons.Ticket /><span>New Ticket</span>
-            </button>
-          </div>
+            <div className="flex items-center gap-4">
+               <div className="relative">
+                 <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
+                 <input 
+                   type="text" 
+                   placeholder="Global Search..." 
+                   value={searchTerm}
+                   onChange={(e) => setSearchTerm(e.target.value)}
+                   className="bg-zinc-50 border border-zinc-200 rounded-lg py-2 pl-9 pr-4 text-[11px] font-medium focus:outline-none focus:border-teal-accent/30 transition-all w-72"
+                 />
+               </div>
+               <div className="flex items-center gap-2 border-l border-zinc-200 pl-4 ml-2">
+                  <div className="w-8 h-8 rounded-full bg-zinc-100 border border-zinc-200" />
+               </div>
+            </div>
         </header>
 
-        <div className="p-8">
+        <div className="p-10 flex-1">
           <AnimatePresence mode="wait">
-
-            {/* ── DASHBOARD ── */}
-            {tab === "dashboard" && (
-              <motion.div key="dashboard" initial={{opacity:0,y:10}} animate={{opacity:1,y:0}} exit={{opacity:0,y:-10}} className="space-y-8">
-                <div className="grid grid-cols-4 gap-5">
-                  <StatCard label="Total Leads" value={db.leads.length} icon={Icons.Users} sub="CRM" />
-                  <StatCard label="Won Deals" value={wonLeads} icon={Icons.Check} sub="Closed" color="teal" />
-                  <StatCard label="Service Queue" value={db.services.length} icon={Icons.Ticket} sub="Tickets" color="amber" />
-                  <StatCard label="Active Customers" value={db.customers.length} icon={Icons.Truck} />
-                </div>
-
-                <div className="grid grid-cols-3 gap-6">
-                  {/* Recent Leads */}
-                  <div className="col-span-2 bg-white rounded-2xl border border-zinc-200 shadow-sm overflow-hidden">
-                    <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
-                      <h3 className="font-bold text-zinc-800 text-sm">Recent Lead Registrations</h3>
-                      <button onClick={()=>setTab("db-manager")} className="text-teal-600 text-xs font-bold hover:underline">View All →</button>
+            {/* Lead Creation Modal */}
+            <Modal isOpen={isLeadModalOpen} onClose={() => setIsLeadModalOpen(false)} title="Register New Lead">
+               <form onSubmit={handleLeadSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                 <div className="space-y-4">
+                    <div>
+                        <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Customer Name *</label>
+                        <input required type="text" value={leadForm.customerName || ""} onChange={e => setLeadForm({...leadForm, customerName: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50" />
                     </div>
-                    <table className="w-full text-xs">
-                      <thead className="bg-zinc-50 text-[10px] text-zinc-400 font-bold uppercase tracking-wider">
-                        <tr>{["Company Name","Contact","Region","Sales Agent","Status"].map(h=><th key={h} className="px-5 py-3 text-left">{h}</th>)}</tr>
-                      </thead>
-                      <tbody className="divide-y divide-zinc-50">
-                        {db.leads.slice(-6).reverse().map(l=>(
-                          <tr key={l.id} className="hover:bg-zinc-50/60 transition-colors">
-                            <td className="px-5 py-3 font-semibold text-zinc-900">{l.customerName}</td>
-                            <td className="px-5 py-3 text-zinc-500">{l.contactName}</td>
-                            <td className="px-5 py-3"><span className="bg-zinc-100 text-zinc-600 rounded px-1.5 py-0.5 text-[10px] font-bold">{l.region}</span></td>
-                            <td className="px-5 py-3 text-zinc-600">{l.salesPerson}</td>
-                            <td className="px-5 py-3"><span className={cn("px-2 py-0.5 rounded-full text-[10px] font-bold", statusColor(l.status))}>{l.status}</span></td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  {/* Service Tickets */}
-                  <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm overflow-hidden">
-                    <div className="px-5 py-4 border-b border-zinc-100">
-                      <h3 className="font-bold text-zinc-800 text-sm">Service Tickets</h3>
-                      {pendingTickets > 0 && <div className="text-[10px] text-amber-600 font-bold mt-0.5">{pendingTickets} pending action</div>}
+                    <div>
+                        <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Contact Name</label>
+                        <input type="text" value={leadForm.contactName || ""} onChange={e => setLeadForm({...leadForm, contactName: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50" />
                     </div>
-                    <div className="divide-y divide-zinc-50">
-                      {db.services.slice(-5).reverse().map(s=>(
-                        <div key={s.id} className="px-5 py-3 hover:bg-zinc-50 transition-colors">
-                          <div className="flex items-center justify-between mb-1">
-                            <span className="font-bold text-[11px] text-zinc-800 font-mono">{s.ticketId}</span>
-                            <span className={cn("text-[9px] font-bold px-1.5 py-0.5 rounded-full", statusColor(s.status))}>{s.status}</span>
-                          </div>
-                          <div className="text-[10px] text-zinc-600 font-semibold">{s.customerName}</div>
-                          <div className="text-[9px] text-zinc-400 mt-0.5 truncate">{s.description?.substring(0,55)}...</div>
-                          {s.assignee && <div className="text-[9px] text-teal-600 font-bold mt-1">→ {s.assignee}</div>}
+                    <div>
+                        <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Designation</label>
+                        <input type="text" value={leadForm.designation || ""} onChange={e => setLeadForm({...leadForm, designation: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Phone</label>
+                            <input type="text" value={leadForm.phone || ""} onChange={e => setLeadForm({...leadForm, phone: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50" />
                         </div>
-                      ))}
-                      {db.services.length === 0 && <div className="p-8 text-center text-zinc-400 text-xs">No tickets yet</div>}
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Email</label>
+                            <input type="email" value={leadForm.email || ""} onChange={e => setLeadForm({...leadForm, email: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50" />
+                        </div>
                     </div>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Region</label>
+                            <select value={leadForm.region} onChange={e => setLeadForm({...leadForm, region: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50">
+                                {REGIONS.map(r => <option key={r} value={r}>{r}</option>)}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Source</label>
+                            <select value={leadForm.source} onChange={e => setLeadForm({...leadForm, source: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50">
+                                {SOURCES.map(s => <option key={s} value={s}>{s}</option>)}
+                            </select>
+                        </div>
+                    </div>
+                    <div>
+                        <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Address</label>
+                        <textarea rows={2} value={leadForm.address || ""} onChange={e => setLeadForm({...leadForm, address: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50 resize-none" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Coordinates</label>
+                            <input type="text" placeholder="Lat, Long" value={leadForm.coordinates || ""} onChange={e => setLeadForm({...leadForm, coordinates: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50" />
+                        </div>
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Map Link</label>
+                            <input type="text" value={leadForm.mapLink || ""} onChange={e => setLeadForm({...leadForm, mapLink: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50" />
+                        </div>
+                    </div>
+                 </div>
+
+                 <div className="space-y-4">
+                     <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Status</label>
+                            <select value={leadForm.status} onChange={e => setLeadForm({...leadForm, status: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50">
+                                {LEAD_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Implementation Type</label>
+                            <select value={leadForm.implementationType} onChange={e => setLeadForm({...leadForm, implementationType: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50">
+                                {IMPLEMENTATION_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                        </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Sales Person</label>
+                            <select value={leadForm.salesPerson} onChange={e => setLeadForm({...leadForm, salesPerson: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50">
+                                {SALES_PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Sales Type</label>
+                            <select value={leadForm.salesType} onChange={e => setLeadForm({...leadForm, salesType: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50">
+                                {SALES_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                        </div>
+                    </div>
+                    <div>
+                        <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Requested Person</label>
+                        <select value={leadForm.requestedPerson} onChange={e => setLeadForm({...leadForm, requestedPerson: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50">
+                            <option value="">Select requested person</option>
+                            {REQUESTED_PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                    </div>
+                    <div className="grid grid-cols-4 gap-2 text-center">
+                        <div>
+                            <label className="block text-[8px] font-bold text-zinc-400 uppercase mb-1">New</label>
+                            <input type="number" min="0" value={leadForm.newQty || 0} onChange={e => setLeadForm({...leadForm, newQty: parseInt(e.target.value)})} className="w-full bg-zinc-50 border border-zinc-200 rounded p-1 text-xs text-center" />
+                        </div>
+                        <div>
+                            <label className="block text-[8px] font-bold text-zinc-400 uppercase mb-1">Migrate</label>
+                            <input type="number" min="0" value={leadForm.migrateQty || 0} onChange={e => setLeadForm({...leadForm, migrateQty: parseInt(e.target.value)})} className="w-full bg-zinc-50 border border-zinc-200 rounded p-1 text-xs text-center" />
+                        </div>
+                        <div>
+                            <label className="block text-[8px] font-bold text-zinc-400 uppercase mb-1">Trading</label>
+                            <input type="number" min="0" value={leadForm.tradingQty || 0} onChange={e => setLeadForm({...leadForm, tradingQty: parseInt(e.target.value)})} className="w-full bg-zinc-50 border border-zinc-200 rounded p-1 text-xs text-center" />
+                        </div>
+                        <div>
+                            <label className="block text-[8px] font-bold text-zinc-400 uppercase mb-1">Other</label>
+                            <input type="number" min="0" value={leadForm.otherQty || 0} onChange={e => setLeadForm({...leadForm, otherQty: parseInt(e.target.value)})} className="w-full bg-zinc-50 border border-zinc-200 rounded p-1 text-xs text-center" />
+                        </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Project Value</label>
+                            <input type="text" value={leadForm.projectValue || ""} onChange={e => setLeadForm({...leadForm, projectValue: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50" />
+                        </div>
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Accessories</label>
+                            <input type="text" value={leadForm.accessories || ""} onChange={e => setLeadForm({...leadForm, accessories: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50" />
+                        </div>
+                    </div>
+                    <div>
+                        <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Comment</label>
+                        <textarea rows={2} value={leadForm.comment || ""} onChange={e => setLeadForm({...leadForm, comment: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50 resize-none" />
+                    </div>
+                    <button type="submit" className="w-full bg-teal-accent text-white font-bold py-3 rounded-xl shadow-lg shadow-teal-accent/20 hover:opacity-90 transition-all text-xs uppercase tracking-widest mt-4">Save Record</button>
+                 </div>
+               </form>
+            </Modal>
+
+            {/* Ticket Creation Modal */}
+            {/* <Modal isOpen={isTicketModalOpen} onClose={() => setIsTicketModalOpen(false)} title="Create Service Ticket">
+               <form onSubmit={handleTicketSubmit} className="space-y-6">
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-4">
+                       <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Customer Name *</label>
+                            <input required type="text" value={ticketForm.customerName || ""} onChange={e => setTicketForm({...ticketForm, customerName: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50" />
+                        </div>
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Ticket Status</label>
+                            <select value={ticketForm.status} onChange={e => setTicketForm({...ticketForm, status: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50">
+                                {TICKET_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Quantity</label>
+                            <input type="number" min="1" value={ticketForm.quantity || 1} onChange={e => setTicketForm({...ticketForm, quantity: parseInt(e.target.value)})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50" />
+                        </div>
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Requested Person</label>
+                            <select value={ticketForm.requestedPerson} onChange={e => setTicketForm({...ticketForm, requestedPerson: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50">
+                                <option value="">Select requested person</option>
+                                {REQUESTED_PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
+                            </select>
+                        </div>
+                    </div>
+                    <div className="space-y-4">
+                        <div className="grid grid-cols-2 gap-4">
+                             <div>
+                                <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Payment</label>
+                                <select value={ticketForm.payment} onChange={e => setTicketForm({...ticketForm, payment: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50">
+                                    {PAYMENT_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                                </select>
+                             </div>
+                             <div>
+                                <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Amount</label>
+                                <input type="text" placeholder="AED 0.00" value={ticketForm.amount || ""} onChange={e => setTicketForm({...ticketForm, amount: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50" />
+                             </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                             <div>
+                                <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Invoice Status</label>
+                                <select value={ticketForm.invoiceStatus} onChange={e => setTicketForm({...ticketForm, invoiceStatus: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50">
+                                    {INVOICE_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                                </select>
+                             </div>
+                             <div>
+                                <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Payment Status</label>
+                                <select value={ticketForm.paymentStatus} onChange={e => setTicketForm({...ticketForm, paymentStatus: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50">
+                                    {PAYMENT_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                                </select>
+                             </div>
+                        </div>
+                        <div>
+                            <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Assignee</label>
+                            <input type="text" placeholder="Technical Team / Person" value={ticketForm.assignee || ""} onChange={e => setTicketForm({...ticketForm, assignee: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50" />
+                        </div>
+                    </div>
+                 </div>
+                 <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Description / Issue *</label>
+                    <textarea required rows={4} value={ticketForm.description || ""} onChange={e => setTicketForm({...ticketForm, description: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-3 text-xs focus:outline-none focus:border-teal-accent/50 resize-none" />
+                 </div>
+                 <button type="submit" className="w-full bg-zinc-900 text-white font-bold py-3 rounded-xl hover:opacity-90 transition-all text-xs uppercase tracking-widest">Generate Ticket</button>
+               </form>
+            </Modal> */}
+
+            {activeTab === "new-form" && (
+              <motion.div 
+                key="new-form"
+                initial={{ opacity: 0, scale: 0.99 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.99 }}
+                className="bg-white rounded-lg shadow-2xl border border-zinc-200 overflow-hidden flex flex-col h-full"
+              >
+                {/* Window Header */}
+                <div className="bg-zinc-50 border-b border-zinc-200 px-4 py-2 flex items-center justify-between">
+                  <div className="text-[11px] font-medium text-zinc-600 flex items-center gap-2">
+                    New Form - {new Date().toLocaleDateString('en-GB').replace(/\//g, '-')}
+                  </div>
+                  <div className="flex items-center gap-4 text-zinc-400">
+                    <Minus size={14} className="hover:text-zinc-600 cursor-pointer" />
+                    <Square size={10} className="hover:text-zinc-600 cursor-pointer" />
+                    <X size={14} className="hover:text-red-500 cursor-pointer" onClick={resetLeadForm} />
                   </div>
                 </div>
 
-                {/* Note about field naming */}
-                <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-xs text-amber-800">
-                  <strong>📌 Field Naming Note:</strong> In <em>Leads</em>, "Company Name" = the prospect's company (formerly labeled "Customer Name" — now unified). In <em>Customers</em>, "Company Name" is the same field for established clients. These refer to the same concept at different pipeline stages — not a mistake, but now consistently labeled.
-                </div>
-              </motion.div>
-            )}
+                <div className="p-8 space-y-8 flex-1 overflow-y-auto bg-[#F8FAFC]">
+                  {searchTerm && (
+                    <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden shadow-md mb-6">
+                      <div className="bg-[#00ADC6]/5 border-b border-[#00ADC6]/10 px-4 py-2.5 flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-[#00ADC6] flex items-center gap-1.5 uppercase tracking-wider">
+                          <Search size={12} /> Matched Customer Accounts For "{searchTerm}"
+                        </span>
+                        <span className="text-[10px] font-mono text-zinc-500 font-bold">{filteredCustomers.length} Found</span>
+                      </div>
+                      {filteredCustomers.length === 0 ? (
+                        <div className="p-6 text-center text-xs text-zinc-400">
+                          No matched customer accounts found. Submit form below to create a new one.
+                        </div>
+                      ) : (
+                        <div className="overflow-x-auto max-h-48 scrollbar-thin">
+                          <table className="w-full text-left text-[11px]">
+                            <thead className="bg-[#F8FAFC] border-b border-zinc-200 text-zinc-500 uppercase text-[9px] tracking-wider font-bold">
+                              <tr>
+                                <th className="px-4 py-2 bg-zinc-50">Customer Name</th>
+                                <th className="px-4 py-2 bg-zinc-50">Implementation Type</th>
+                                <th className="px-4 py-2 bg-zinc-50">Sales Person</th>
+                                <th className="px-4 py-2 bg-zinc-50">Contact Name</th>
+                                <th className="px-4 py-2 bg-zinc-50">Phone</th>
+                                <th className="px-4 py-2 bg-zinc-50">Locator Username</th>
+                                <th className="px-4 py-2 bg-zinc-50">Locator Status</th>
+                                <th className="px-4 py-2 bg-zinc-50 text-center">Vehicle Count</th>
+                                <th className="px-4 py-2 text-center bg-zinc-50">Action</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-zinc-100 text-zinc-650">
+                              {filteredCustomers.map(cust => {
+                                const latestRequest = [...data.registrations].reverse().find(r => r.customerName.toLowerCase() === cust.name.toLowerCase());
+                                const salesRep = latestRequest?.salesPerson || latestRequest?.requestedPerson || "Shams";
+                                const locatorUsername = cust.name ? cust.name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12) : "temco";
+                                const locatorStatus = "active";
 
-            {/* ── NEW FORM ── */}
-            {tab === "new-form" && (
-              <motion.div key="new-form" initial={{opacity:0,scale:0.99}} animate={{opacity:1,scale:1}} exit={{opacity:0}} className="max-w-5xl mx-auto">
-                {/* Mode toggle */}
-                <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm overflow-hidden">
-                  <div className="bg-zinc-50 border-b border-zinc-200 px-5 py-3 flex items-center justify-between">
-                    <div className="flex bg-zinc-100 p-1 rounded-xl gap-1">
-                      <button onClick={()=>{setNewFormMode("lead");setNewFormSuccess(false);}} className={cn("px-5 py-2 rounded-lg text-xs font-bold transition-all",newFormMode==="lead"?"bg-white text-teal-700 shadow-sm":"text-zinc-500 hover:text-zinc-700")}>Lead Registration</button>
-                      <button onClick={()=>{setNewFormMode("ticket");setNewFormSuccess(false);}} className={cn("px-5 py-2 rounded-lg text-xs font-bold transition-all",newFormMode==="ticket"?"bg-white text-zinc-900 shadow-sm":"text-zinc-500 hover:text-zinc-700")}>Service Ticket</button>
-                    </div>
-                    <span className="text-[10px] text-zinc-400">{new Date().toLocaleDateString('en-GB')}</span>
-                  </div>
-
-                  <div className="p-6">
-                    {newFormSuccess && (
-                      <motion.div initial={{opacity:0,y:-10}} animate={{opacity:1,y:0}} className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 mb-5 text-xs text-emerald-700 font-bold flex items-center gap-2">
-                        <Icons.Check />Record saved successfully to database!
-                      </motion.div>
-                    )}
-                    {newFormMode === "lead"
-                      ? <LeadFormBody form={newLeadForm} setForm={setNewLeadForm} customers={db.customers} onSubmit={saveLead} submitLabel="SAVE LEAD" />
-                      : <TicketFormBody form={newTicketForm} setForm={setNewTicketForm} customers={db.customers} onSubmit={saveTicket} submitLabel="CREATE TICKET" />
-                    }
-                  </div>
-                </div>
-              </motion.div>
-            )}
-
-            {/* ── EXISTING FORM ── */}
-            {tab === "existing-form" && (
-              <motion.div key="existing-form" initial={{opacity:0,scale:0.99}} animate={{opacity:1,scale:1}} exit={{opacity:0}} className="max-w-5xl mx-auto space-y-5">
-                {/* Search & Select */}
-                <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
-                  <div className="flex items-center gap-4">
-                    <div className="flex bg-zinc-100 p-1 rounded-xl gap-1">
-                      <button onClick={()=>{setExistingType("lead");setSelectedExisting(null);setExistingForm(null);}} className={cn("px-4 py-1.5 rounded-lg text-xs font-bold transition-all",existingType==="lead"?"bg-white text-teal-700 shadow-sm":"text-zinc-500")}>Leads ({db.leads.length})</button>
-                      <button onClick={()=>{setExistingType("ticket");setSelectedExisting(null);setExistingForm(null);}} className={cn("px-4 py-1.5 rounded-lg text-xs font-bold transition-all",existingType==="ticket"?"bg-white text-zinc-900 shadow-sm":"text-zinc-500")}>Tickets ({db.services.length})</button>
-                    </div>
-                    <div className="relative flex-1">
-                      <input value={existingSearch} onChange={e=>setExistingSearch(e.target.value)} placeholder={`Search ${existingType === "lead" ? "leads by company/contact..." : "tickets by customer/ID..."}`} className="w-full bg-zinc-50 border border-zinc-200 rounded-xl py-2 pl-4 pr-4 text-xs font-medium focus:outline-none focus:border-teal-500/30"/>
-                    </div>
-                    {selectedExisting && <button onClick={()=>{setSelectedExisting(null);setExistingForm(null);}} className="text-xs text-red-500 font-bold hover:underline">Clear</button>}
-                  </div>
-
-                  {/* Results */}
-                  {existingSearch && !selectedExisting && (
-                    <div className="mt-3 border border-zinc-200 rounded-xl overflow-hidden">
-                      {(existingType === "lead" ? db.leads.filter(l=>l.customerName.toLowerCase().includes(existingSearch.toLowerCase())||l.contactName?.toLowerCase().includes(existingSearch.toLowerCase())) : db.services.filter(s=>s.customerName.toLowerCase().includes(existingSearch.toLowerCase())||s.ticketId.toLowerCase().includes(existingSearch.toLowerCase()))).slice(0,6).map(item=>(
-                        <button key={item.id} onClick={()=>{setSelectedExisting(item.id);setExistingForm({...item});setExistingSearch("");}} className="w-full flex items-center gap-4 px-4 py-3 hover:bg-teal-50 transition-colors text-left border-b border-zinc-50 last:border-0">
-                          <div className="flex-1">
-                            <div className="font-semibold text-xs text-zinc-900">{item.customerName}</div>
-                            <div className="text-[10px] text-zinc-400">{existingType==="lead" ? `${item.contactName} · ${item.region}` : `${item.ticketId} · ${item.status}`}</div>
-                          </div>
-                          <span className={cn("text-[10px] px-2 py-0.5 rounded-full font-bold", statusColor(item.status))}>{item.status}</span>
-                        </button>
-                      ))}
+                                return (
+                                  <tr key={cust.id} className="hover:bg-teal-50/40 hover:text-zinc-950 transition-colors cursor-pointer" onClick={() => handleSelectCustomer(cust)}>
+                                    <td className="px-4 py-2 font-bold text-zinc-900">{cust.name}</td>
+                                    <td className="px-4 py-2 font-medium">
+                                      <span className="bg-zinc-100 text-zinc-700 px-1.5 py-0.5 rounded text-[10px] font-semibold">{cust.implementationType || "LOCATOR"}</span>
+                                    </td>
+                                    <td className="px-4 py-2 font-medium text-zinc-600">{salesRep}</td>
+                                    <td className="px-4 py-2">{cust.contactName || "—"}</td>
+                                    <td className="px-4 py-2 whitespace-nowrap">{cust.phone || "—"}</td>
+                                    <td className="px-4 py-2 font-mono text-zinc-600 font-medium">{locatorUsername}</td>
+                                    <td className="px-4 py-2">
+                                      <span className="inline-flex items-center gap-1 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase">
+                                        <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                                        {locatorStatus}
+                                      </span>
+                                    </td>
+                                    <td className="px-4 py-2 font-bold text-zinc-800 font-mono text-center">{cust.vehicleCount || 0}</td>
+                                    <td className="px-4 py-1.5 text-center">
+                                      <button 
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleSelectCustomer(cust);
+                                        }}
+                                        className="bg-[#00ADC6] hover:opacity-90 text-white font-bold text-[9px] px-2 py-1 rounded shadow-sm uppercase tracking-wide cursor-pointer"
+                                      >
+                                        Populate
+                                      </button>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
                     </div>
                   )}
-                </div>
 
-                {/* Edit Form */}
-                {existingForm && (
-                  <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm overflow-hidden">
-                    <div className="bg-zinc-50 border-b border-zinc-200 px-5 py-3 flex items-center justify-between">
-                      <div>
-                        <div className="font-bold text-zinc-800 text-sm">{existingForm.customerName}</div>
-                        <div className="text-[10px] text-zinc-400">{existingType==="lead" ? `Lead #${existingForm.id}` : `Ticket ${existingForm.ticketId}`}</div>
+                  <form onSubmit={handleLeadSubmit} className="space-y-6">
+                    {/* Main Grid */}
+                    <div className="grid grid-cols-6 gap-x-6 gap-y-4">
+                      {/* Column 1 */}
+                      <div className="space-y-4">
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Source: <span className="text-red-500">*</span></label>
+                          <select 
+                            required
+                            value={leadForm.source} 
+                            onChange={e => setLeadForm({...leadForm, source: e.target.value})}
+                            className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none"
+                          >
+                            <option value="">Select Source</option>
+                            {SOURCES.map(s => <option key={s} value={s}>{s}</option>)}
+                          </select>
+                        </div>
                       </div>
-                      <button onClick={()=>deleteItem(existingType==="lead"?"lead":"service", existingForm.id)} className="text-red-500 hover:text-red-700 text-xs font-bold flex items-center gap-1">
-                        <Icons.Trash /> Delete Record
+
+                      {/* Column 2 */}
+                      <div className="space-y-4">
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-zinc-500">Region:</label>
+                          <select 
+                            value={leadForm.region} 
+                            onChange={e => setLeadForm({...leadForm, region: e.target.value})}
+                            className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none"
+                          >
+                            <option value="">Select Region</option>
+                            {REGIONS.map(r => <option key={r} value={r}>{r}</option>)}
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* Column 3 */}
+                      <div className="space-y-4">
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Status: <span className="text-red-500">*</span></label>
+                          <select 
+                            required
+                            value={leadForm.status} 
+                            onChange={e => setLeadForm({...leadForm, status: e.target.value})}
+                            className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none"
+                          >
+                            {LEAD_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* Column 4 */}
+                      <div className="space-y-4">
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Implementation Type: <span className="text-red-500">*</span></label>
+                          <select 
+                            required
+                            value={leadForm.implementationType} 
+                            onChange={e => setLeadForm({...leadForm, implementationType: e.target.value})}
+                            className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none"
+                          >
+                            <option value="">Select Implementation Type</option>
+                            {IMPLEMENTATION_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* Column 5 */}
+                      <div className="space-y-4">
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-zinc-500">Price:</label>
+                          <input 
+                             type="text"
+                             placeholder="Price Details"
+                             value={leadForm.priceDetails || ""}
+                             onChange={e => setLeadForm({...leadForm, priceDetails: e.target.value})}
+                             className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Column 6 */}
+                      <div className="space-y-4">
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-zinc-500">Project Value:</label>
+                          <input 
+                            type="text"
+                            placeholder="Project Value"
+                            value={leadForm.projectValue || ""} 
+                            onChange={e => setLeadForm({...leadForm, projectValue: e.target.value})}
+                            className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Customer Info Row */}
+                    <div className="grid grid-cols-6 gap-x-6 gap-y-4">
+                       <div className="col-span-2 space-y-1 relative">
+                          <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Customer Name: <span className="text-red-500">*</span></label>
+                          <input 
+                            required 
+                            type="text" 
+                            placeholder="Customer Name" 
+                            value={leadForm.customerName || ""} 
+                            onChange={e => {
+                              setLeadForm({...leadForm, customerName: e.target.value});
+                              setShowSuggestions(true);
+                            }}
+                            onFocus={() => setShowSuggestions(true)}
+                            onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+                            className="w-full bg-white border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" 
+                          />
+                          {showSuggestions && leadForm.customerName && (
+                            (() => {
+                              const list = data.customers.filter(c => c.name.toLowerCase().includes(leadForm.customerName!.toLowerCase()));
+                              if (list.length === 0) return null;
+                              return (
+                                <div className="absolute left-0 right-0 z-50 bg-white border border-[#E2E8F0] rounded shadow-lg max-h-48 overflow-y-auto mt-1 divide-y divide-zinc-100">
+                                  {list.map(cust => (
+                                    <div
+                                      key={`suggest-${cust.id}`}
+                                      onMouseDown={() => {
+                                        setLeadForm(prev => ({
+                                          ...prev,
+                                          customerName: cust.name,
+                                          contactName: cust.contactName || prev.contactName || "",
+                                          phone: cust.phone || prev.phone || "",
+                                          email: cust.email || prev.email || "",
+                                          region: cust.region || prev.region || ""
+                                        }));
+                                        setShowSuggestions(false);
+                                      }}
+                                      className="px-3 py-2 text-[11px] text-zinc-700 hover:bg-teal-50/70 cursor-pointer transition-colors"
+                                    >
+                                      <div className="font-bold text-zinc-950 flex items-center justify-between">
+                                        <span>{cust.name}</span>
+                                        <span className="text-[8px] bg-zinc-100 font-bold px-1 py-0.5 rounded text-zinc-500 font-mono">Existing</span>
+                                      </div>
+                                      {cust.contactName && (
+                                        <div className="text-[9px] text-zinc-500 mt-0.5">Contact: {cust.contactName} ({cust.phone || "No phone"})</div>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              );
+                            })()
+                          )}
+                       </div>
+                       <div className="space-y-1">
+                          <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Contact Name: <span className="text-red-500">*</span></label>
+                          <input required type="text" placeholder="Contact Name" value={leadForm.contactName || ""} onChange={e => setLeadForm({...leadForm, contactName: e.target.value})} className="w-full bg-white border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                       </div>
+                       <div className="space-y-1">
+                          <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Phone: <span className="text-red-500">*</span></label>
+                          <input required type="text" placeholder="Phone" value={leadForm.phone || ""} onChange={e => setLeadForm({...leadForm, phone: e.target.value})} className="w-full bg-white border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                       </div>
+                       <div className="space-y-1">
+                         <label className="text-[10px] text-zinc-500">Email:</label>
+                         <input type="email" placeholder="Email" value={leadForm.email || ""} onChange={e => setLeadForm({...leadForm, email: e.target.value})} className="w-full bg-white border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                       </div>
+                       <div className="space-y-1">
+                          <label className="text-[10px] text-zinc-500">Designation:</label>
+                          <input type="text" placeholder="Designation" value={leadForm.designation || ""} onChange={e => setLeadForm({...leadForm, designation: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                       </div>
+                    </div>
+
+                    {/* Location/Sales Row */}
+                    <div className="grid grid-cols-6 gap-x-6 gap-y-4">
+                       <div className="col-span-2 space-y-1">
+                          <label className="text-[10px] text-zinc-500">Address:</label>
+                          <input type="text" placeholder="Address" value={leadForm.address || ""} onChange={e => setLeadForm({...leadForm, address: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                       </div>
+                       <div className="col-span-2 space-y-1">
+                          <label className="text-[10px] text-zinc-500">Map Link:</label>
+                          <input type="text" placeholder="Map Link" value={leadForm.mapLink || ""} onChange={e => setLeadForm({...leadForm, mapLink: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                       </div>
+                       <div className="space-y-1">
+                          <label className="text-[10px] text-zinc-500">Coordinates:</label>
+                          <input type="text" placeholder="Coordinates" value={leadForm.coordinates || ""} onChange={e => setLeadForm({...leadForm, coordinates: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                       </div>
+                       <div className="space-y-1">
+                          <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Sales Person: <span className="text-red-500">*</span></label>
+                          <select required value={leadForm.salesPerson} onChange={e => setLeadForm({...leadForm, salesPerson: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none">
+                            {SALES_PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
+                          </select>
+                       </div>
+                    </div>
+
+                    <div className="grid grid-cols-6 gap-4">
+                       <div className="col-start-6 space-y-1">
+                          <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Sales Type: <span className="text-red-500">*</span></label>
+                          <select required value={leadForm.salesType} onChange={e => setLeadForm({...leadForm, salesType: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none">
+                            {SALES_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                          </select>
+                        </div>
+                    </div>
+
+                    {/* Quantities Row */}
+                    <div className="grid grid-cols-8 gap-3 items-end">
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">New Qty:</label>
+                        <input type="number" value={leadForm.newQty} onChange={e => setLeadForm({...leadForm, newQty: parseInt(e.target.value)})} className="w-full bg-white border border-[#E2E8F0] rounded px-2 py-1.5 text-[11px] text-zinc-600 focus:outline-none text-center h-8" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">Migrate Qty:</label>
+                        <input type="number" value={leadForm.migrateQty} onChange={e => setLeadForm({...leadForm, migrateQty: parseInt(e.target.value)})} className="w-full bg-white border border-[#E2E8F0] rounded px-2 py-1.5 text-[11px] text-zinc-600 focus:outline-none text-center h-8" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">Trading Qty:</label>
+                        <input type="number" value={leadForm.tradingQty} onChange={e => setLeadForm({...leadForm, tradingQty: parseInt(e.target.value)})} className="w-full bg-white border border-[#E2E8F0] rounded px-2 py-1.5 text-[11px] text-zinc-600 focus:outline-none text-center h-8" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">Service Qty:</label>
+                        <input type="number" value={leadForm.serviceQty} onChange={e => setLeadForm({...leadForm, serviceQty: parseInt(e.target.value)})} className="w-full bg-white border border-[#E2E8F0] rounded px-2 py-1.5 text-[11px] text-zinc-600 focus:outline-none text-center h-8" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">Other Qty:</label>
+                        <input type="number" value={leadForm.otherQty} onChange={e => setLeadForm({...leadForm, otherQty: parseInt(e.target.value)})} className="w-full bg-white border border-[#E2E8F0] rounded px-2 py-1.5 text-[11px] text-zinc-600 focus:outline-none text-center h-8" />
+                      </div>
+                      <div className="col-span-2 space-y-1">
+                        <label className="text-[10px] text-zinc-500">Accessories If Any:</label>
+                        <input type="text" placeholder="Accessories" value={leadForm.accessories || ""} onChange={e => setLeadForm({...leadForm, accessories: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none h-8" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Requested Person: <span className="text-red-500">*</span></label>
+                        <select required value={leadForm.requestedPerson} onChange={e => setLeadForm({...leadForm, requestedPerson: e.target.value})} className="w-full bg-white border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none h-8">
+                          <option value="">Select requested person</option>
+                          {REQUESTED_PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Comment Section */}
+                    <div className="space-y-1">
+                      <textarea 
+                        rows={2} 
+                        placeholder="Comment"
+                        value={leadForm.comment || ""} 
+                        onChange={e => setLeadForm({...leadForm, comment: e.target.value})}
+                        className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-4 py-3 text-[11px] text-zinc-600 focus:outline-none"
+                      />
+                    </div>
+
+                    {/* Additional Contact Details */}
+                    <div className="space-y-4 pt-4 border-t border-zinc-100">
+                      <h4 className="text-[11px] text-zinc-400 font-medium">Additional Contact Details</h4>
+                      <button type="button" className="w-8 h-8 rounded bg-teal-accent flex items-center justify-center text-white shadow-lg shadow-teal-accent/20 hover:scale-105 transition-all">
+                        <Plus size={18} />
                       </button>
                     </div>
-                    <div className="p-6">
-                      {newFormSuccess && (
-                        <motion.div initial={{opacity:0,y:-10}} animate={{opacity:1,y:0}} className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 mb-5 text-xs text-emerald-700 font-bold flex items-center gap-2">
-                          <Icons.Check />Changes saved successfully!
-                        </motion.div>
-                      )}
-                      {existingType === "lead"
-                        ? <LeadFormBody form={existingForm} setForm={f=>setExistingForm(typeof f==="function"?f(existingForm):f)} customers={db.customers} onSubmit={saveExisting} submitLabel="UPDATE LEAD" isExisting />
-                        : <TicketFormBody form={existingForm} setForm={f=>setExistingForm(typeof f==="function"?f(existingForm):f)} customers={db.customers} onSubmit={saveExisting} submitLabel="UPDATE TICKET" />
-                      }
+
+                    <div className="flex justify-end pt-4">
+                      <button 
+                        type="submit" 
+                        className="bg-teal-accent text-white px-10 py-2 rounded font-bold text-[10px] uppercase tracking-widest shadow-lg shadow-teal-accent/10 hover:opacity-95 transition-all"
+                      >
+                        SAVE
+                      </button>
                     </div>
-                  </div>
-                )}
-                {!existingForm && !existingSearch && (
-                  <div className="text-center py-16 text-zinc-400">
-                    <Icons.Search />
-                    <p className="text-sm font-medium mt-3">Search for a {existingType} to edit</p>
-                    <p className="text-xs mt-1">Type in the search box above to find records</p>
-                  </div>
-                )}
-              </motion.div>
-            )}
-
-            {/* ── AI CHAT ── */}
-            {tab === "ai" && (
-              <motion.div key="ai" initial={{opacity:0,scale:0.98}} animate={{opacity:1,scale:1}} exit={{opacity:0}}>
-                <SynoAIChat db={db} setDb={setDb} />
-              </motion.div>
-            )}
-
-            {/* ── DB MANAGER ── */}
-            {tab === "db-manager" && (
-              <motion.div key="db-manager" initial={{opacity:0,y:10}} animate={{opacity:1,y:0}} exit={{opacity:0}} className="space-y-6">
-                <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm overflow-hidden">
-                  <div className="p-4 border-b border-zinc-100 bg-zinc-50/60 flex items-center gap-4 flex-wrap">
-                    <div className="flex bg-zinc-100 p-1 rounded-xl gap-1">
-                      {[["leads","Leads"],["services","Tickets"],["customers","Customers"]].map(([k,l])=>(
-                        <button key={k} onClick={()=>{setDbTab(k);setDbSearch("");}} className={cn("px-4 py-2 rounded-lg text-xs font-extrabold uppercase tracking-wider transition-all",dbTab===k?"bg-white text-zinc-900 shadow-sm":"text-zinc-500 hover:text-zinc-700")}>
-                          {l} ({k==="leads"?db.leads.length:k==="services"?db.services.length:db.customers.length})
-                        </button>
-                      ))}
-                    </div>
-                    <div className="relative flex-1 min-w-48">
-                      <input value={dbSearch} onChange={e=>setDbSearch(e.target.value)} placeholder={`Search ${dbTab}...`} className="w-full bg-white border border-zinc-200 rounded-xl py-2 pl-8 pr-4 text-xs font-medium focus:outline-none focus:border-teal-500/40"/>
-                      <Icons.Search />
-                    </div>
-                  </div>
-
-                  <div className="overflow-x-auto">
-                    {/* LEADS TABLE */}
-                    {dbTab === "leads" && (
-                      <table className="w-full text-xs">
-                        <thead className="bg-zinc-50 text-[10px] text-zinc-400 font-bold uppercase tracking-wider border-b border-zinc-100">
-                          <tr>{["#","Company Name","Contact Name","Phone","Region","Sales Agent","Status","Qty","Actions"].map(h=><th key={h} className="px-5 py-3.5 text-left">{h}</th>)}</tr>
-                        </thead>
-                        <tbody className="divide-y divide-zinc-50 text-zinc-700">
-                          {db.leads.filter(l=>l.customerName.toLowerCase().includes(dbSearch.toLowerCase())||l.contactName?.toLowerCase().includes(dbSearch.toLowerCase())).map(l=>(
-                            <tr key={l.id} className="hover:bg-zinc-50/50">
-                              <td className="px-5 py-3 text-zinc-400 font-mono">#{l.id}</td>
-                              <td className="px-5 py-3 font-bold text-zinc-900">{l.customerName}</td>
-                              <td className="px-5 py-3 text-zinc-500">{l.contactName||"—"}</td>
-                              <td className="px-5 py-3 text-zinc-500">{l.phone}</td>
-                              <td className="px-5 py-3"><span className="bg-zinc-100 rounded px-1.5 py-0.5 text-[10px] font-bold">{l.region}</span></td>
-                              <td className="px-5 py-3">{l.salesPerson}</td>
-                              <td className="px-5 py-3"><span className={cn("px-2 py-0.5 rounded-full text-[10px] font-bold",statusColor(l.status))}>{l.status}</span></td>
-                              <td className="px-5 py-3 font-mono font-bold text-zinc-500">{(l.newQty||0)+(l.migrateQty||0)+(l.tradingQty||0)}</td>
-                              <td className="px-5 py-3 flex gap-3">
-                                <button onClick={()=>{setTab("existing-form");setExistingType("lead");setSelectedExisting(l.id);setExistingForm({...l});}} className="text-teal-600 font-bold hover:text-teal-800 flex items-center gap-1"><Icons.Pen/>Edit</button>
-                                <button onClick={()=>deleteItem("lead",l.id)} className="text-red-500 font-bold hover:text-red-700 flex items-center gap-1"><Icons.Trash/>Del</button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    )}
-
-                    {/* SERVICES TABLE */}
-                    {dbTab === "services" && (
-                      <table className="w-full text-xs">
-                        <thead className="bg-zinc-50 text-[10px] text-zinc-400 font-bold uppercase tracking-wider border-b border-zinc-100">
-                          <tr>{["Ticket ID","Company Name","Description","Status","Qty","Assignee","Payment","Amount","Actions"].map(h=><th key={h} className="px-5 py-3.5 text-left">{h}</th>)}</tr>
-                        </thead>
-                        <tbody className="divide-y divide-zinc-50 text-zinc-700">
-                          {db.services.filter(s=>s.customerName.toLowerCase().includes(dbSearch.toLowerCase())||s.ticketId.toLowerCase().includes(dbSearch.toLowerCase())).map(s=>(
-                            <tr key={s.id} className="hover:bg-zinc-50/50">
-                              <td className="px-5 py-3 font-mono font-bold text-teal-700">{s.ticketId}</td>
-                              <td className="px-5 py-3 font-bold text-zinc-900">{s.customerName}</td>
-                              <td className="px-5 py-3 text-zinc-500 max-w-xs truncate">{s.description}</td>
-                              <td className="px-5 py-3"><span className={cn("px-2 py-0.5 rounded-full text-[10px] font-bold",statusColor(s.status))}>{s.status}</span></td>
-                              <td className="px-5 py-3 font-mono">{s.quantity}</td>
-                              <td className="px-5 py-3 text-zinc-600">{s.assignee||<span className="text-zinc-300">—</span>}</td>
-                              <td className="px-5 py-3"><span className={cn("text-[10px] font-bold",s.paymentStatus==="Paid"?"text-emerald-600":"text-amber-600")}>{s.paymentStatus}</span></td>
-                              <td className="px-5 py-3 font-mono">{s.amount||"—"}</td>
-                              <td className="px-5 py-3 flex gap-3">
-                                <button onClick={()=>{setTab("existing-form");setExistingType("ticket");setSelectedExisting(s.id);setExistingForm({...s});}} className="text-teal-600 font-bold hover:text-teal-800 flex items-center gap-1"><Icons.Pen/>Edit</button>
-                                <button onClick={()=>deleteItem("service",s.id)} className="text-red-500 font-bold hover:text-red-700 flex items-center gap-1"><Icons.Trash/>Del</button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    )}
-
-                    {/* CUSTOMERS TABLE */}
-                    {dbTab === "customers" && (
-                      <table className="w-full text-xs">
-                        <thead className="bg-zinc-50 text-[10px] text-zinc-400 font-bold uppercase tracking-wider border-b border-zinc-100">
-                          <tr>{["#","Company Name","Contact Person","Phone","Email","Region","Vehicle Count","Impl. Type","Actions"].map(h=><th key={h} className="px-5 py-3.5 text-left">{h}</th>)}</tr>
-                        </thead>
-                        <tbody className="divide-y divide-zinc-50 text-zinc-700">
-                          {db.customers.filter(c=>c.name.toLowerCase().includes(dbSearch.toLowerCase())||c.contactName?.toLowerCase().includes(dbSearch.toLowerCase())).map(c=>(
-                            <tr key={c.id} className="hover:bg-zinc-50/50">
-                              <td className="px-5 py-3 text-zinc-400 font-mono">#{c.id}</td>
-                              <td className="px-5 py-3 font-bold text-zinc-900">{c.name}</td>
-                              <td className="px-5 py-3 text-zinc-500">{c.contactName||"—"}</td>
-                              <td className="px-5 py-3 text-zinc-500">{c.phone||"—"}</td>
-                              <td className="px-5 py-3 text-zinc-500">{c.email||"—"}</td>
-                              <td className="px-5 py-3"><span className="bg-zinc-100 rounded px-1.5 py-0.5 text-[10px] font-bold">{c.region||"—"}</span></td>
-                              <td className="px-5 py-3 font-bold text-teal-600 font-mono">{c.vehicleCount} units</td>
-                              <td className="px-5 py-3 text-zinc-500">{c.implementationType||"—"}</td>
-                              <td className="px-5 py-3 flex gap-3">
-                                <button onClick={()=>setEditItem({type:"customer",data:{...c}})} className="text-teal-600 font-bold hover:text-teal-800 flex items-center gap-1"><Icons.Pen/>Edit</button>
-                                <button onClick={()=>deleteItem("customer",c.id)} className="text-red-500 font-bold hover:text-red-700 flex items-center gap-1"><Icons.Trash/>Del</button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    )}
-                  </div>
+                  </form>
                 </div>
               </motion.div>
             )}
+
+            {activeTab === "overview" && (() => {
+              const regs = data.registrations || [];
+              const svcs = data.services || [];
+              const custs = data.customers || [];
+
+              // 1. Value Aggregates
+              let totalProjectValue = 0;
+              let wonProjectValue = 0;
+              let pipelineValue = 0;
+
+              regs.forEach(reg => {
+                const val = parseFloat(reg.projectValue || "0") || 0;
+                totalProjectValue += val;
+                if (reg.status === "Completed" || reg.status === "Won" || reg.status === "Approved") {
+                  wonProjectValue += val;
+                } else if (reg.status !== "Lost" && reg.status !== "Deleted") {
+                  pipelineValue += val;
+                }
+              });
+
+              // 2. Unit quantities
+              let newUnits = 0;
+              let migrateUnits = 0;
+              let tradingUnits = 0;
+              let serviceUnits = 0;
+              let otherUnits = 0;
+
+              regs.forEach(reg => {
+                newUnits += reg.newQty || 0;
+                migrateUnits += reg.migrateQty || 0;
+                tradingUnits += reg.tradingQty || 0;
+                serviceUnits += reg.serviceQty || 0;
+                otherUnits += reg.otherQty || 0;
+              });
+
+              const totalRegisteredUnits = newUnits + migrateUnits + tradingUnits + serviceUnits + otherUnits;
+
+              // 3. Region Stats
+              const regionMap: Record<string, { count: number, value: number }> = {};
+              REGIONS.forEach(r => {
+                regionMap[r] = { count: 0, value: 0 };
+              });
+              regs.forEach(reg => {
+                const r = reg.region || "Other";
+                if (!regionMap[r]) regionMap[r] = { count: 0, value: 0 };
+                regionMap[r].count += 1;
+                regionMap[r].value += parseFloat(reg.projectValue || "0") || 0;
+              });
+
+              const regionsSorted = Object.entries(regionMap)
+                .map(([name, stats]) => ({ name, ...stats }))
+                .sort((a, b) => b.count - a.count);
+
+              // 4. Sales Representative Performance Leaderboard
+              const repPerformanceMap: Record<string, { count: number, value: number, won: number }> = {};
+              regs.forEach(reg => {
+                const rep = reg.salesPerson || reg.requestedPerson || "Unassigned";
+                const val = parseFloat(reg.projectValue || "0") || 0;
+                const isWon = reg.status === "Completed" || reg.status === "Won" || reg.status === "Approved";
+                
+                if (!repPerformanceMap[rep]) {
+                  repPerformanceMap[rep] = { count: 0, value: 0, won: 0 };
+                }
+                repPerformanceMap[rep].count += 1;
+                repPerformanceMap[rep].value += val;
+                if (isWon) repPerformanceMap[rep].won += val;
+              });
+
+              const leaderboardSorted = Object.entries(repPerformanceMap)
+                .map(([name, stats]) => ({ name, ...stats }))
+                .sort((a, b) => b.value - a.value)
+                .slice(0, 5); // top 5 sales reps
+
+              // 5. Status distribution
+              const statusCounts: Record<string, number> = {};
+              regs.forEach(reg => {
+                const st = reg.status || "New Lead";
+                statusCounts[st] = (statusCounts[st] || 0) + 1;
+              });
+
+              // 6. Service Ticket distribution
+              const pendingServicesCount = svcs.filter(s => s.status !== "Completed" && s.status !== "Solved").length;
+              const totalLeads = regs.length;
+
+              // Formatting money
+              const formatCurrency = (val: number) => {
+                if (val >= 1_000_000) {
+                  return `AED ${(val / 1_000_000).toFixed(2)}M`;
+                }
+                if (val >= 1_000) {
+                  return `AED ${(val / 1_000).toFixed(1)}K`;
+                }
+                return `AED ${val.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+              };
+
+              const safePercent = (part: number, total: number) => {
+                if (total <= 0) return 0;
+                return Math.round((part / total) * 100);
+              };
+
+              return (
+                <motion.div 
+                  key="overview"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="space-y-8 pb-10"
+                >
+                  {/* Database Connection Warning / Troubleshooting Diagnostics */}
+                  {dbError && (
+                    <div className="bg-amber-50/90 border border-amber-200/80 rounded-xl p-5 shadow-sm text-stone-900 space-y-4">
+                      <div className="flex items-start gap-4">
+                        <div className="p-3 bg-amber-100 rounded-lg text-amber-700 mt-1">
+                          <Database className="w-6 h-6 animate-pulse" />
+                        </div>
+                        <div className="flex-1 space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="font-semibold text-amber-950 text-base">Live Database Offline (Demo Mode Active)</h3>
+                            <span className="px-2 py-0.5 text-xs font-semibold bg-amber-100 border border-amber-200 text-amber-800 rounded-full">Disconnected</span>
+                          </div>
+                          <p className="text-sm text-amber-900/85 max-w-4xl leading-relaxed">
+                            SynoHub SQL Database is currently unreachable on <strong>{dbError.connectionConfig?.host || 'localhost'}</strong>. 
+                            Since this dashboard environment is hosted on isolated, serverless cloud containers, <code>localhost</code> references the container sandbox itself. 
+                            To ensure you have a fully functional preview, we have pre-loaded your SQL dataset as rich <strong>Demo Data</strong> below! You can continue testing leads, reports, and table updates.
+                          </p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-center gap-3 pt-1">
+                        <button 
+                          onClick={() => setShowDiagnostics(!showDiagnostics)}
+                          className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg transition-colors cursor-pointer"
+                        >
+                          <Activity className="w-3.5 h-3.5" />
+                          {showDiagnostics ? "Hide Setup Guide" : "Troubleshoot Connection"}
+                        </button>
+                        <span className="text-xs text-amber-800/60 font-mono">
+                          Error Code: {dbError.error.split(' ')[0] || 'ECONNREFUSED'}
+                        </span>
+                      </div>
+
+                      {showDiagnostics && (
+                        <motion.div 
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: "auto" }}
+                          className="border-t border-amber-200/60 pt-4 space-y-4"
+                        >
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="bg-white/60 p-4 rounded-lg border border-amber-200/40 space-y-2">
+                              <h4 className="text-xs font-bold text-amber-900 uppercase tracking-wider">Attempted Config</h4>
+                              <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 text-xs font-mono text-stone-700">
+                                <div>DB Host:</div>
+                                <div className="text-amber-950 font-bold">{dbError.connectionConfig?.host}</div>
+                                <div>DB Port:</div>
+                                <div className="text-amber-950 font-bold">{dbError.connectionConfig?.port}</div>
+                                <div>DB User:</div>
+                                <div className="text-amber-950">{dbError.connectionConfig?.user}</div>
+                                <div>Database:</div>
+                                <div className="text-amber-950">{dbError.connectionConfig?.database}</div>
+                                <div>Password:</div>
+                                <div className="text-amber-950">
+                                  {dbError.connectionConfig?.passwordProvided ? "•••••••• (Custom)" : "None Provided"}
+                                </div>
+                                <div>Socket Path:</div>
+                                <div className="text-stone-500 overflow-hidden text-ellipsis whitespace-nowrap" title={dbError.connectionConfig?.socketPath}>
+                                  {dbError.connectionConfig?.socketPath}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="bg-stone-900 text-stone-200 p-4 rounded-lg font-mono text-xs space-y-1.5 relative overflow-x-auto border border-stone-800 shadow-inner">
+                              <div className="flex items-center justify-between pb-1 border-b border-stone-800 mb-1.5 text-stone-400 font-sans text-[10px] uppercase font-bold tracking-wider">
+                                <span>Terminal System Exception</span>
+                                <span className="text-red-400">● Failure</span>
+                              </div>
+                              <div className="text-red-400 font-bold">{dbError.error}</div>
+                              {dbError.details && <div className="text-stone-400 mt-1">{dbError.details}</div>}
+                            </div>
+                          </div>
+
+                          <div className="bg-amber-100/45 p-4 rounded-lg border border-amber-200/50 space-y-2 text-xs text-amber-950 leading-relaxed">
+                            <h4 className="text-xs font-bold uppercase tracking-wider text-amber-900">How to Connect Your SQL Database</h4>
+                            <ul className="list-decimal pl-4 space-y-1.5">
+                              <li>
+                                <strong>Host your database or expose your port:</strong> Ensure your MySQL database is running on a cloud instance (e.g., AWS RDS, PlanetScale, Supabase) or expose your local port via a secure tunnel like <code>ngrok tcp 3306</code>.
+                              </li>
+                              <li>
+                                <strong>Configure Credentials:</strong> Open the <strong>Settings</strong> panel of Google AI Studio and navigate to the <strong>Secrets</strong> or Environment Variables section.
+                              </li>
+                              <li>
+                                <strong>Assign connection variables:</strong> Save your database connection configs under these exact keys:
+                                <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mt-2 font-mono text-[11px] bg-white/70 p-2 rounded border border-amber-200 text-stone-800">
+                                  <div><code>DB_HOST</code></div>
+                                  <div><code>DB_PORT</code></div>
+                                  <div><code>DB_USER</code></div>
+                                  <div><code>DB_PASSWORD</code></div>
+                                  <div><code>DB_NAME</code></div>
+                                </div>
+                              </li>
+                            </ul>
+                          </div>
+                        </motion.div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Top Stats Cards Grid */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                    <StatCard 
+                       label="Won Revenue Potential" 
+                       value={formatCurrency(wonProjectValue)} 
+                       icon={Zap} 
+                       color="bg-emerald-500" 
+                       subValue={`Pipeline: ${formatCurrency(pipelineValue)}`} 
+                    />
+                    <StatCard 
+                       label="Active System Units" 
+                       value={totalRegisteredUnits} 
+                       icon={Package} 
+                       color="bg-teal-accent" 
+                       subValue={`New Tracker: ${newUnits}`} 
+                    />
+                    <StatCard 
+                       label="Total Leads Count" 
+                       value={totalLeads} 
+                       icon={Users} 
+                       color="bg-sky-500" 
+                       subValue={`Won / Completed: ${(statusCounts["Won"] || 0) + (statusCounts["Completed"] || 0)}`} 
+                    />
+                    <StatCard 
+                       label="Services Queue Balance" 
+                       value={`${pendingServicesCount} Pending`} 
+                       icon={Shield} 
+                       color="bg-zinc-800" 
+                       subValue={`Total Tickets: ${svcs.length}`} 
+                    />
+                  </div>
+
+                  {/* Main Charts & Analytics Grid */}
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                     {/* Left Columns Container (Span 2) */}
+                     <div className="lg:col-span-2 space-y-6">
+                        
+                        {/* Device Types Stacked Allocation and Region breakdown */}
+                        <div className="bg-white border border-zinc-200 rounded-2xl p-6 shadow-sm space-y-6">
+                          <div>
+                            <h3 className="font-bold text-zinc-950 text-sm tracking-tight flex items-center gap-2">
+                              <Database className="text-teal-accent" size={16} />
+                              Units Allocation by Tracker Configuration
+                            </h3>
+                            <p className="text-zinc-500 text-[11px] mt-0.5">Distribution map of {totalRegisteredUnits} trackers requested across all active sales cycles.</p>
+                          </div>
+
+                          {/* Combined Multi-Color Progress Indicator */}
+                          <div className="h-6 w-full rounded-lg overflow-hidden flex shadow-inner border border-zinc-100">
+                            {newUnits > 0 && (
+                              <div 
+                                className="h-full bg-teal-accent hover:opacity-95 transition-all text-[10px] font-extrabold text-white flex items-center justify-center pointer-events-none" 
+                                style={{ width: `${safePercent(newUnits, totalRegisteredUnits)}%` }}
+                              >
+                                {safePercent(newUnits, totalRegisteredUnits) >= 8 && `${safePercent(newUnits, totalRegisteredUnits)}%`}
+                              </div>
+                            )}
+                            {migrateUnits > 0 && (
+                              <div 
+                                className="h-full bg-amber-400 hover:opacity-95 transition-all text-[10px] font-extrabold text-[#744210] flex items-center justify-center pointer-events-none" 
+                                style={{ width: `${safePercent(migrateUnits, totalRegisteredUnits)}%` }}
+                              >
+                                {safePercent(migrateUnits, totalRegisteredUnits) >= 8 && `${safePercent(migrateUnits, totalRegisteredUnits)}%`}
+                              </div>
+                            )}
+                            {tradingUnits > 0 && (
+                              <div 
+                                className="h-full bg-rose-500 hover:opacity-95 transition-all text-[10px] font-extrabold text-white flex items-center justify-center pointer-events-none" 
+                                style={{ width: `${safePercent(tradingUnits, totalRegisteredUnits)}%` }}
+                              >
+                                {safePercent(tradingUnits, totalRegisteredUnits) >= 8 && `${safePercent(tradingUnits, totalRegisteredUnits)}%`}
+                              </div>
+                            )}
+                            {serviceUnits > 0 && (
+                              <div 
+                                className="h-full bg-sky-500 hover:opacity-95 transition-all text-[10px] font-extrabold text-white flex items-center justify-center pointer-events-none" 
+                                style={{ width: `${safePercent(serviceUnits, totalRegisteredUnits)}%` }}
+                              >
+                                {safePercent(serviceUnits, totalRegisteredUnits) >= 8 && `${safePercent(serviceUnits, totalRegisteredUnits)}%`}
+                              </div>
+                            )}
+                            {otherUnits > 0 && (
+                              <div 
+                                className="h-full bg-zinc-400 hover:opacity-95 transition-all text-[10px] font-extrabold text-white flex items-center justify-center pointer-events-none" 
+                                style={{ width: `${safePercent(otherUnits, totalRegisteredUnits)}%` }}
+                              >
+                                {safePercent(otherUnits, totalRegisteredUnits) >= 8 && `${safePercent(otherUnits, totalRegisteredUnits)}%`}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Legends Grid */}
+                          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs pt-2">
+                            <div className="flex items-center gap-2 border-l-4 border-teal-accent pl-2">
+                              <span className="font-semibold text-zinc-900 block">{newUnits} Unit</span>
+                              <span className="text-[10px] text-zinc-400 block uppercase font-bold tracking-tight">New Tracker</span>
+                            </div>
+                            <div className="flex items-center gap-2 border-l-4 border-amber-400 pl-2">
+                              <span className="font-semibold text-zinc-900 block">{migrateUnits} Unit</span>
+                              <span className="text-[10px] text-zinc-400 block uppercase font-bold tracking-tight">Migration</span>
+                            </div>
+                            <div className="flex items-center gap-2 border-l-4 border-rose-500 pl-2">
+                              <span className="font-semibold text-zinc-900 block">{tradingUnits} Unit</span>
+                              <span className="text-[10px] text-zinc-400 block uppercase font-bold tracking-tight">Trading</span>
+                            </div>
+                            <div className="flex items-center gap-2 border-l-4 border-sky-500 pl-2">
+                              <span className="font-semibold text-zinc-900 block">{serviceUnits} Unit</span>
+                              <span className="text-[10px] text-zinc-400 block uppercase font-bold tracking-tight">Service</span>
+                            </div>
+                            <div className="flex items-center gap-2 border-l-4 border-zinc-400 pl-2">
+                              <span className="font-semibold text-zinc-900 block">{otherUnits} Unit</span>
+                              <span className="text-[10px] text-zinc-400 block uppercase font-bold tracking-tight">Other config</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Recent Activity Logs Feed from CRM */}
+                        <div className="bg-white border border-zinc-200 rounded-2xl p-6 shadow-sm space-y-6">
+                           <div className="flex items-center justify-between">
+                              <div>
+                                <h3 className="font-bold text-zinc-950 text-sm tracking-tight flex items-center gap-2">
+                                  <Clock size={16} className="text-teal-accent" />
+                                  Real-Time Activity Feed {searchTerm && <span className="text-xs font-normal text-zinc-400 font-sans">(Filtered)</span>}
+                                </h3>
+                                <p className="text-zinc-500 text-[11px] mt-0.5">Showing recent registrations and updates. Click to view or edit form.</p>
+                              </div>
+                           </div>
+                           
+                           <div className="grid gap-3">
+                             {filteredRegistrations.length === 0 ? (
+                               <div className="border border-dashed border-zinc-200 rounded-xl p-16 text-center text-zinc-400 text-xs">
+                                 {searchTerm ? "No matching saved leads found." : "No recent activity logs found."}
+                               </div>
+                             ) : (
+                               (() => {
+                                 const sorted = [...filteredRegistrations].reverse();
+                                 const visible = showAllFeed ? sorted : sorted.slice(0, 5);
+                                 return (
+                                   <>
+                                     {visible.map((reg, idx) => (
+                                       <div 
+                                         key={`dash-reg-${reg.id || idx}-${idx}`} 
+                                         onClick={() => {
+                                           setSelectedLeadId(reg.id);
+                                           setActiveTab("existing-form");
+                                         }}
+                                         className="flex items-center gap-5 p-4 border border-zinc-100 rounded-xl hover:border-teal-accent/30 hover:bg-zinc-50/50 transition-all group shadow-xs cursor-pointer"
+                                       >
+                                          <div className="w-9 h-9 rounded-lg bg-zinc-50 border border-zinc-100 flex items-center justify-center text-zinc-400 group-hover:bg-teal-accent group-hover:text-white group-hover:border-teal-accent transition-all">
+                                            <ChevronRight size={16} className="group-hover:translate-x-0.5 transition-transform" />
+                                          </div>
+                                          <div className="flex-1 min-w-0">
+                                             <h4 className="text-xs font-bold text-zinc-800 truncate group-hover:text-teal-accent transition-colors">{reg.customerName}</h4>
+                                             <div className="flex items-center gap-3 mt-1 text-[10px]">
+                                               <span className="text-zinc-500 font-bold bg-zinc-100 px-1.5 py-0.5 rounded uppercase tracking-tighter">{reg.region || "DXB"}</span>
+                                               <span className={`font-extrabold uppercase tracking-tighter ${
+                                                 reg.status === 'Won' || reg.status === 'Completed' ? 'text-emerald-600' : 
+                                                 reg.status === 'Lost' ? 'text-red-500' :
+                                                 'text-zinc-500'
+                                               }`}>{reg.status}</span>
+                                               <span className="text-zinc-400 font-semibold">• Contract: {reg.projectValue ? formatCurrency(parseFloat(reg.projectValue)) : "—"}</span>
+                                             </div>
+                                          </div>
+                                          <div className="text-right shrink-0">
+                                             <div className="text-[10px] font-bold text-zinc-900">Registered By</div>
+                                             <p className="text-[9px] text-zinc-400 font-semibold mt-1 uppercase tracking-wider">
+                                               {reg.salesPerson || reg.requestedPerson || "Staff"}
+                                             </p>
+                                          </div>
+                                       </div>
+                                     ))}
+                                     {filteredRegistrations.length > 5 && (
+                                       <button 
+                                         onClick={(e) => {
+                                           e.stopPropagation();
+                                           setShowAllFeed(!showAllFeed);
+                                         }}
+                                         className="w-full py-2.5 border border-dashed border-zinc-200 hover:border-teal-accent/40 rounded-xl text-[10px] font-extrabold uppercase tracking-wider text-zinc-500 hover:text-teal-accent transition-all text-center mt-2"
+                                       >
+                                         {showAllFeed ? "Collapse Activity Feed" : `View All Saved Logs (${filteredRegistrations.length})`}
+                                       </button>
+                                     )}
+                                   </>
+                                 );
+                               })()
+                             )}
+                           </div>
+                        </div>
+                     </div>
+
+                     {/* Right columns container (leaderboards, geographical splits) */}
+                     <div className="space-y-6">
+                        {/* Region breakdown progress lists */}
+                        <div className="bg-white border border-zinc-200 rounded-2xl p-6 shadow-sm space-y-4">
+                          <div>
+                            <h3 className="font-bold text-zinc-950 text-sm tracking-tight flex items-center gap-2">
+                              <MapPin size={16} className="text-teal-accent" />
+                              Regional Market Share
+                            </h3>
+                            <p className="text-zinc-500 text-[11px] mt-0.5">Coverage and transaction values spread over regions.</p>
+                          </div>
+
+                          <div className="space-y-3.5 pt-2">
+                            {regionsSorted.map((reg) => {
+                              const maxRegionCount = Math.max(...regionsSorted.map(r => r.count)) || 1;
+                              const widthPct = (reg.count / maxRegionCount) * 100;
+                              return (
+                                <div key={reg.name} className="space-y-1">
+                                  <div className="flex justify-between text-xs font-semibold">
+                                    <span className="text-zinc-800">{reg.name}</span>
+                                    <span className="text-zinc-500 font-mono text-[11px]">{reg.count} Leads ({formatCurrency(reg.value)})</span>
+                                  </div>
+                                  <div className="w-full h-1.5 bg-zinc-50 border border-zinc-100 rounded-full overflow-hidden">
+                                    <div className="h-full bg-teal-accent rounded-full" style={{ width: `${widthPct}%` }} />
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        {/* Top Sales Representatives Leaders */}
+                        <div className="bg-white border border-zinc-200 rounded-2xl p-6 shadow-sm space-y-4">
+                          <div>
+                            <h3 className="font-bold text-zinc-950 text-sm tracking-tight flex items-center gap-2">
+                              <Zap size={16} className="text-amber-500 animate-pulse" />
+                              Sales Leaderboard
+                            </h3>
+                            <p className="text-zinc-500 text-[11px] mt-0.5">Top performing representatives by potential sales volume from leads.</p>
+                          </div>
+
+                          <div className="space-y-3.5 pt-2">
+                            {leaderboardSorted.length === 0 ? (
+                              <p className="text-xs text-zinc-400 text-center py-6">No representatives registered yet.</p>
+                            ) : (
+                              leaderboardSorted.map((leader, i) => {
+                                const maxVal = Math.max(...leaderboardSorted.map(l => l.value)) || 1;
+                                const barPct = (leader.value / maxVal) * 100;
+                                return (
+                                  <div key={leader.name} className="space-y-1.5">
+                                    <div className="flex items-center justify-between text-xs">
+                                      <div className="flex items-center gap-2 font-bold">
+                                        <span className="text-[10px] w-4 h-4 rounded-full bg-zinc-100 flex items-center justify-center text-zinc-600 border border-zinc-200">{i + 1}</span>
+                                        <span className="text-zinc-800">{leader.name}</span>
+                                      </div>
+                                      <span className="font-mono text-zinc-600 text-[11px]">{formatCurrency(leader.value)}</span>
+                                    </div>
+                                    <div className="w-full h-1.5 bg-zinc-50 border border-zinc-100 rounded-full overflow-hidden">
+                                      <div className="h-full bg-amber-500 rounded-full" style={{ width: `${barPct}%` }} />
+                                    </div>
+                                    <div className="flex justify-between text-[9px] text-zinc-400 font-bold uppercase tracking-wider pl-6">
+                                      <span>{leader.count} Active Leads</span>
+                                      <span className="text-emerald-600">Won {formatCurrency(leader.won)}</span>
+                                    </div>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                        </div>
+                     </div>
+                  </div>
+                </motion.div>
+              );
+            })()}
+
+
+
+            {activeTab === "existing-form" && (
+              <motion.div 
+                key="existing-form"
+                initial={{ opacity: 0, scale: 0.99 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.99 }}
+                className="bg-white rounded-lg shadow-2xl border border-zinc-200 overflow-hidden flex flex-col h-full"
+              >
+                {/* Window Header */}
+                <div className="bg-zinc-50 border-b border-zinc-200 px-4 py-2 flex items-center justify-between">
+                  <div className="text-[11px] font-medium text-zinc-650 flex items-center gap-2">
+                    Existing Form - {new Date().toLocaleDateString('en-GB').replace(/\//g, '-')}
+                  </div>
+                  <div className="flex items-center gap-4 text-zinc-400">
+                    <Minus size={14} className="hover:text-zinc-600 cursor-pointer" />
+                    <Square size={10} className="hover:text-zinc-600 cursor-pointer" />
+                    <X size={14} className="hover:text-red-500 cursor-pointer" onClick={() => setActiveTab("new-form")} />
+                  </div>
+                </div>
+
+                <div className="p-8 space-y-6 flex-1 overflow-y-auto bg-[#F8FAFC]">
+                  {searchTerm && (
+                    <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden shadow-md mb-6">
+                      <div className="bg-[#00ADC6]/5 border-b border-[#00ADC6]/10 px-4 py-2.5 flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-[#00ADC6] flex items-center gap-1.5 uppercase tracking-wider">
+                          <Search size={12} /> Matched Customer Accounts For "{searchTerm}"
+                        </span>
+                        <span className="text-[10px] font-mono text-zinc-500 font-bold">{filteredCustomers.length} Found</span>
+                      </div>
+                      {filteredCustomers.length === 0 ? (
+                        <div className="p-6 text-center text-xs text-zinc-400">
+                          No matched customer accounts found. Submit form below to create a new one.
+                        </div>
+                      ) : (
+                        <div className="overflow-x-auto max-h-48 scrollbar-thin">
+                          <table className="w-full text-left text-[11px]">
+                            <thead className="bg-[#F8FAFC] border-b border-zinc-200 text-zinc-500 uppercase text-[9px] tracking-wider font-bold">
+                              <tr>
+                                <th className="px-4 py-2 bg-zinc-50">Customer Name</th>
+                                <th className="px-4 py-2 bg-zinc-50">Implementation Type</th>
+                                <th className="px-4 py-2 bg-zinc-50">Sales Person</th>
+                                <th className="px-4 py-2 bg-zinc-50">Contact Name</th>
+                                <th className="px-4 py-2 bg-zinc-50">Phone</th>
+                                <th className="px-4 py-2 bg-zinc-50">Locator Username</th>
+                                <th className="px-4 py-2 bg-zinc-50">Locator Status</th>
+                                <th className="px-4 py-2 bg-zinc-50 text-center">Vehicle Count</th>
+                                <th className="px-4 py-2 text-center bg-zinc-50">Action</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-zinc-100 text-zinc-650">
+                              {filteredCustomers.map(cust => {
+                                const latestRequest = [...data.registrations].reverse().find(r => r.customerName.toLowerCase() === cust.name.toLowerCase());
+                                const salesRep = latestRequest?.salesPerson || latestRequest?.requestedPerson || "Shams";
+                                const locatorUsername = cust.name ? cust.name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12) : "temco";
+                                const locatorStatus = "active";
+
+                                return (
+                                  <tr key={cust.id} className="hover:bg-teal-50/40 hover:text-zinc-950 transition-colors cursor-pointer" onClick={() => handleSelectCustomer(cust)}>
+                                    <td className="px-4 py-2 font-bold text-zinc-900">{cust.name}</td>
+                                    <td className="px-4 py-2 font-medium">
+                                      <span className="bg-zinc-100 text-zinc-700 px-1.5 py-0.5 rounded text-[10px] font-semibold">{cust.implementationType || "LOCATOR"}</span>
+                                    </td>
+                                    <td className="px-4 py-2 font-medium text-zinc-600">{salesRep}</td>
+                                    <td className="px-4 py-2">{cust.contactName || "—"}</td>
+                                    <td className="px-4 py-2 whitespace-nowrap">{cust.phone || "—"}</td>
+                                    <td className="px-4 py-2 font-mono text-zinc-600 font-medium">{locatorUsername}</td>
+                                    <td className="px-4 py-2">
+                                      <span className="inline-flex items-center gap-1 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase">
+                                        <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                                        {locatorStatus}
+                                      </span>
+                                    </td>
+                                    <td className="px-4 py-2 font-bold text-zinc-800 font-mono text-center">{cust.vehicleCount || 0}</td>
+                                    <td className="px-4 py-1.5 text-center">
+                                      <button 
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleSelectCustomer(cust);
+                                        }}
+                                        className="bg-[#00ADC6] hover:opacity-90 text-white font-bold text-[9px] px-2 py-1 rounded shadow-sm uppercase tracking-wide cursor-pointer"
+                                      >
+                                        Load Lead
+                                      </button>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Operational Target Status Banner */}
+                  <div className="mb-4">
+                    {selectedLeadId ? (
+                      <div className="bg-amber-50 border border-amber-200/50 rounded-xl p-3 flex items-center justify-between text-[11px] text-amber-800">
+                        <div className="flex items-center gap-2">
+                          <span className="flex h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
+                          <span>✏️ <strong>Editing Mode:</strong> You are editing lead <strong>ID #{selectedLeadId} ({leadForm.customerName})</strong>. Submitting will execute a direct database <code>PUT</code> update.</span>
+                        </div>
+                        <button type="button" onClick={resetLeadForm} className="font-bold underline uppercase tracking-tighter text-[9px] hover:text-amber-900">Switch to Create New</button>
+                      </div>
+                    ) : leadForm.customerName ? (
+                      <div className="bg-teal-50 border border-teal-200/50 rounded-xl p-3 text-[11px] text-teal-800 flex items-center gap-2">
+                        <span className="flex h-2 w-2 rounded-full bg-[#00ADC6]" />
+                        <span>➕ <strong>Create New Lead Mode:</strong> Registering a new lead for customer <strong>{leadForm.customerName}</strong>. Submitting will execute a database <code>POST</code> insert.</span>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <form onSubmit={handleLeadSubmit} className="space-y-4">
+                    {/* Row 1: Source, Region, Status, Imp Type, Price, Proj Value */}
+                    <div className="grid grid-cols-6 gap-4">
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Source: <span className="text-red-500">*</span></label>
+                        <select required value={leadForm.source} onChange={e => setLeadForm({...leadForm, source: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none">
+                          <option value="">Select Source</option>
+                          {SOURCES.map(s => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">Region:</label>
+                        <select value={leadForm.region} onChange={e => setLeadForm({...leadForm, region: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none">
+                          <option value="">Select Region</option>
+                          {REGIONS.map(r => <option key={r} value={r}>{r}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Status: <span className="text-red-500">*</span></label>
+                        <select required value={leadForm.status} onChange={e => setLeadForm({...leadForm, status: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none">
+                          {LEAD_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Implementation Type: <span className="text-red-500">*</span></label>
+                        <select required value={leadForm.implementationType} onChange={e => setLeadForm({...leadForm, implementationType: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none">
+                           <option value="">Select Implementation Type</option>
+                           {IMPLEMENTATION_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">Price:</label>
+                        <input type="text" placeholder="Price Details" value={leadForm.priceDetails || ""} onChange={e => setLeadForm({...leadForm, priceDetails: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">Project Value:</label>
+                        <input type="text" placeholder="Project Value" value={leadForm.projectValue || ""} onChange={e => setLeadForm({...leadForm, projectValue: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                      </div>
+                    </div>
+
+                    {/* Row 2: Customer Name, Contact Name, Phone, Email, Designation */}
+                    <div className="grid grid-cols-6 gap-4">
+                      <div className="col-span-2 space-y-1 relative">
+                        <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Customer Name: <span className="text-red-500">*</span></label>
+                        <input 
+                          disabled={!!selectedLeadId}
+                          required 
+                          type="text" 
+                          placeholder="Customer Name" 
+                          value={leadForm.customerName || ""} 
+                          onChange={e => {
+                            setLeadForm({...leadForm, customerName: e.target.value});
+                            setShowExistingSuggestions(true);
+                          }}
+                          onFocus={() => setShowExistingSuggestions(true)}
+                          onBlur={() => setTimeout(() => setShowExistingSuggestions(false), 200)}
+                          className="w-full disabled:bg-[#E2E8F0]/50 disabled:text-zinc-500 disabled:cursor-not-allowed bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" 
+                        />
+                        {showExistingSuggestions && leadForm.customerName && (
+                          (() => {
+                            const list = data.customers.filter(c => c.name.toLowerCase().includes(leadForm.customerName!.toLowerCase()));
+                            if (list.length === 0) return null;
+                            return (
+                              <div className="absolute left-0 right-0 z-50 bg-white border border-[#E2E8F0] rounded shadow-lg max-h-48 overflow-y-auto mt-1 divide-y divide-zinc-100">
+                                {list.map(cust => (
+                                  <div
+                                    key={`exist-suggest-${cust.id}`}
+                                    onMouseDown={() => {
+                                      setLeadForm(prev => ({
+                                        ...prev,
+                                        customerName: cust.name,
+                                        contactName: cust.contactName || prev.contactName || "",
+                                        phone: cust.phone || prev.phone || "",
+                                        email: cust.email || prev.email || "",
+                                        region: cust.region || prev.region || ""
+                                      }));
+                                      setShowExistingSuggestions(false);
+                                    }}
+                                    className="px-3 py-2 text-[11px] text-zinc-700 hover:bg-teal-50/70 cursor-pointer transition-colors"
+                                  >
+                                    <div className="font-bold text-zinc-950 flex items-center justify-between">
+                                      <span>{cust.name}</span>
+                                      <span className="text-[8px] bg-zinc-100 font-bold px-1 py-0.5 rounded text-zinc-500 font-mono">Existing</span>
+                                    </div>
+                                    {cust.contactName && (
+                                      <div className="text-[9px] text-zinc-500 mt-0.5">Contact: {cust.contactName} ({cust.phone || "No phone"})</div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })()
+                        )}
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Contact Name: <span className="text-red-500">*</span></label>
+                        <input 
+                          disabled={!!selectedLeadId}
+                          required 
+                          type="text" 
+                          placeholder="Contact Name" 
+                          value={leadForm.contactName || ""} 
+                          onChange={e => setLeadForm({...leadForm, contactName: e.target.value})} 
+                          className="w-full disabled:bg-[#E2E8F0]/50 disabled:text-zinc-500 disabled:cursor-not-allowed bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" 
+                        />
+                        {selectedLeadId && (
+                          <div className="text-[8px] text-amber-600 font-bold leading-tight mt-1">
+                            ⚠️ Names locked. Mention changes in comments.
+                          </div>
+                        )}
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Phone: <span className="text-red-500">*</span></label>
+                        <input required type="text" placeholder="Phone" value={leadForm.phone || ""} onChange={e => setLeadForm({...leadForm, phone: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">Email:</label>
+                        <input type="email" placeholder="Email" value={leadForm.email || ""} onChange={e => setLeadForm({...leadForm, email: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">Designation:</label>
+                        <input type="text" placeholder="Designation" value={leadForm.designation || ""} onChange={e => setLeadForm({...leadForm, designation: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                      </div>
+                    </div>
+
+                    {/* Row 3: Address, Map Link, Coordinates, Sales Person, Sales Type */}
+                    <div className="grid grid-cols-6 gap-4">
+                      <div className="col-span-2 space-y-1">
+                        <label className="text-[10px] text-zinc-500">Address:</label>
+                        <input type="text" placeholder="Address" value={leadForm.address || ""} onChange={e => setLeadForm({...leadForm, address: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                      </div>
+                      <div className="col-span-2 space-y-1">
+                        <label className="text-[10px] text-zinc-500">Map Link:</label>
+                        <input type="text" placeholder="Map Link" value={leadForm.mapLink || ""} onChange={e => setLeadForm({...leadForm, mapLink: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">Coordinates:</label>
+                        <input type="text" placeholder="Coordinates" value={leadForm.coordinates || ""} onChange={e => setLeadForm({...leadForm, coordinates: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Sales Person: <span className="text-red-500">*</span></label>
+                        <select required value={leadForm.salesPerson} onChange={e => setLeadForm({...leadForm, salesPerson: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none">
+                          <option value="">Select sales person</option>
+                          {SALES_PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-6 gap-4">
+                       <div className="col-start-6 space-y-1">
+                          <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Sales Type: <span className="text-red-500">*</span></label>
+                          <select required value={leadForm.salesType} onChange={e => setLeadForm({...leadForm, salesType: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none">
+                            <option value="">Select Sales Type</option>
+                            {SALES_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                          </select>
+                        </div>
+                    </div>
+
+                    {/* Row 4: Qtys, Accessories, Req Person */}
+                    <div className="grid grid-cols-8 gap-3 items-end">
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">New Qty:</label>
+                        <input type="number" value={leadForm.newQty} onChange={e => setLeadForm({...leadForm, newQty: parseInt(e.target.value)})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-2 py-1.5 text-[11px] text-zinc-600 focus:outline-none text-center" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">Migrate Qty:</label>
+                        <input type="number" value={leadForm.migrateQty} onChange={e => setLeadForm({...leadForm, migrateQty: parseInt(e.target.value)})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-2 py-1.5 text-[11px] text-zinc-600 focus:outline-none text-center" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">Trading Qty:</label>
+                        <input type="number" value={leadForm.tradingQty} onChange={e => setLeadForm({...leadForm, tradingQty: parseInt(e.target.value)})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-2 py-1.5 text-[11px] text-zinc-600 focus:outline-none text-center" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">Service Qty:</label>
+                        <input type="number" value={leadForm.serviceQty} onChange={e => setLeadForm({...leadForm, serviceQty: parseInt(e.target.value)})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-2 py-1.5 text-[11px] text-zinc-600 focus:outline-none text-center" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500">Other Qty:</label>
+                        <input type="number" value={leadForm.otherQty} onChange={e => setLeadForm({...leadForm, otherQty: parseInt(e.target.value)})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-2 py-1.5 text-[11px] text-zinc-600 focus:outline-none text-center" />
+                      </div>
+                      <div className="col-span-2 space-y-1">
+                        <label className="text-[10px] text-zinc-500">Accessories If Any:</label>
+                        <input type="text" placeholder="Accessories" value={leadForm.accessories || ""} onChange={e => setLeadForm({...leadForm, accessories: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Requested Person: <span className="text-red-500">*</span></label>
+                        <select required value={leadForm.requestedPerson} onChange={e => setLeadForm({...leadForm, requestedPerson: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none">
+                          <option value="">Select requested person</option>
+                          {REQUESTED_PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Comment Section */}
+                    <div className="space-y-1">
+                      <textarea rows={2} placeholder="Comment" value={leadForm.comment || ""} onChange={e => setLeadForm({...leadForm, comment: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-4 py-3 text-[11px] text-zinc-600 focus:outline-none resize-none" />
+                    </div>
+
+                    {/* Additional Contact Details */}
+                    <div className="space-y-4 pt-4 border-t border-zinc-100">
+                      <h4 className="text-[11px] text-zinc-400 font-medium tracking-tight">Additional Contact Details</h4>
+                      <button type="button" className="w-9 h-9 rounded bg-teal-accent flex items-center justify-center text-white shadow-lg shadow-teal-accent/20 hover:scale-105 transition-all">
+                        <Plus size={20} />
+                      </button>
+                    </div>
+
+                    <div className="flex justify-end gap-3 pt-4">
+                      <button 
+                        type="button"
+                        onClick={resetLeadForm}
+                        className="border border-zinc-200 text-zinc-550 px-6 py-2 rounded font-bold text-[10px] uppercase tracking-widest hover:bg-zinc-50 transition-all flex items-center justify-center gap-1.5"
+                      >
+                        <X size={12} /> Clear Form
+                      </button>
+                      <button type="submit" className="bg-teal-accent text-white px-10 py-2 rounded font-bold text-[10px] uppercase tracking-widest shadow-lg shadow-teal-accent/10 hover:opacity-95 transition-all">
+                        SAVE
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </motion.div>
+            )}
+
+            {activeTab === "ai" && (
+              <motion.div 
+                key="ai"
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 1.02 }}
+                className="max-w-4xl mx-auto"
+              >
+                <div className="mb-8 text-center">
+                  <h3 className="text-2xl font-bold text-zinc-900 tracking-tight">SynoHub Cloud Intelligence</h3>
+                  <p className="text-sm text-zinc-500 mt-2">Manage your entire fleet via cognitive automation.</p>
+                </div>
+                <ChatInterface onRecordSaved={(savedRecord) => {
+                  fetchData();
+                  if (savedRecord && savedRecord.type === "registration") {
+                    const findOptionMatch = (value: string | undefined, list: string[], defaultValue?: string): string => {
+                      if (!value) return defaultValue !== undefined ? defaultValue : list[0];
+                      const cleanedVal = value.trim().toUpperCase().replace(/\s*\+\s*/g, '+').replace(/\s+/g, '');
+                      const found = list.find(opt => {
+                        const cleanedOpt = opt.trim().toUpperCase().replace(/\s*\+\s*/g, '+').replace(/\s+/g, '');
+                        return cleanedOpt === cleanedVal || cleanedOpt.startsWith(cleanedVal) || cleanedOpt.includes(cleanedVal) || cleanedVal.includes(cleanedOpt);
+                      });
+                      return found || defaultValue || list[0];
+                    };
+
+                    setLeadForm({
+                      customerName: savedRecord.customerName || "",
+                      contactName: savedRecord.contactName || "",
+                      phone: savedRecord.phone || "",
+                      email: savedRecord.email || "",
+                      region: findOptionMatch(savedRecord.region, REGIONS, REGIONS[0]),
+                      address: savedRecord.address || "",
+                      mapLink: savedRecord.mapLink || "",
+                      coordinates: savedRecord.coordinates || "",
+                      source: findOptionMatch(savedRecord.source, SOURCES, "Company Lead"),
+                      status: findOptionMatch(savedRecord.status, LEAD_STATUSES, "New Lead"),
+                      implementationType: findOptionMatch(savedRecord.implementationType, IMPLEMENTATION_TYPES, "LOCATOR"),
+                      salesPerson: findOptionMatch(savedRecord.salesPerson, SALES_PEOPLE, "Nishad"),
+                      salesType: findOptionMatch(savedRecord.salesType, SALES_TYPES, "New"),
+                      requestedPerson: findOptionMatch(savedRecord.requestedPerson, REQUESTED_PEOPLE),
+                      comment: savedRecord.comment || "",
+                      projectValue: savedRecord.projectValue || "",
+                      priceDetails: savedRecord.priceDetails || "",
+                      accessories: savedRecord.accessories || "",
+                      newQty: savedRecord.newQty || savedRecord.qty || 0,
+                      migrateQty: savedRecord.migrateQty || 0,
+                      tradingQty: savedRecord.tradingQty || 0,
+                      serviceQty: savedRecord.serviceQty || 0,
+                      otherQty: savedRecord.otherQty || 0
+                    });
+                    if (savedRecord.id) {
+                      setSelectedLeadId(savedRecord.id);
+                    }
+                    showToast(`AI Auto-Saved: Lead "${savedRecord.customerName}" successfully logged into CRM!`, "success");
+                  } else if (savedRecord && savedRecord.type === "service") {
+                    showToast(`AI Auto-Saved: Service Ticket for "${savedRecord.customerName}" logged!`, "success");
+                  }
+                }} />
+              </motion.div>
+            )}
+
 
           </AnimatePresence>
         </div>
       </main>
 
-      {/* ── QUICK NEW LEAD MODAL ── */}
-      <Modal isOpen={showNewLeadModal} onClose={()=>setShowNewLeadModal(false)} title="Quick New Lead Registration" wide>
-        <LeadFormBody form={newLeadForm} setForm={setNewLeadForm} customers={db.customers} onSubmit={async(e)=>{await saveLead(e);setShowNewLeadModal(false);}} submitLabel="SAVE & CLOSE" />
-      </Modal>
-
-      {/* ── QUICK NEW TICKET MODAL ── */}
-      <Modal isOpen={showNewTicketModal} onClose={()=>setShowNewTicketModal(false)} title="Create Service Ticket">
-        <TicketFormBody form={newTicketForm} setForm={setNewTicketForm} customers={db.customers} onSubmit={async(e)=>{await saveTicket(e);setShowNewTicketModal(false);}} submitLabel="CREATE TICKET" />
-      </Modal>
-
-      {/* ── EDIT CUSTOMER MODAL ── */}
-      <Modal isOpen={!!editItem} onClose={()=>setEditItem(null)} title={editItem ? `Edit ${editItem.type==="customer"?"Customer":"Record"}` : ""}>
-        {editItem && editItem.type === "customer" && (
-          <form onSubmit={saveEditItem} className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <F label="Company Name" required><input required value={editItem.data.name||""} onChange={e=>setEditItem(p=>({...p,data:{...p.data,name:e.target.value}}))} className={inp}/></F>
-              <F label="Contact Person"><input value={editItem.data.contactName||""} onChange={e=>setEditItem(p=>({...p,data:{...p.data,contactName:e.target.value}}))} className={inp}/></F>
-              <F label="Phone"><input value={editItem.data.phone||""} onChange={e=>setEditItem(p=>({...p,data:{...p.data,phone:e.target.value}}))} className={inp}/></F>
-              <F label="Email"><input type="email" value={editItem.data.email||""} onChange={e=>setEditItem(p=>({...p,data:{...p.data,email:e.target.value}}))} className={inp}/></F>
-              <F label="Region"><select value={editItem.data.region||""} onChange={e=>setEditItem(p=>({...p,data:{...p.data,region:e.target.value}}))} className={inp}>{REGIONS.map(r=><option key={r}>{r}</option>)}</select></F>
-              <F label="Implementation Type"><select value={editItem.data.implementationType||""} onChange={e=>setEditItem(p=>({...p,data:{...p.data,implementationType:e.target.value}}))} className={inp}><option value="">—</option>{IMPL_TYPES.map(t=><option key={t}>{t}</option>)}</select></F>
-              <F label="Vehicle Count"><input type="number" min="0" value={editItem.data.vehicleCount||0} onChange={e=>setEditItem(p=>({...p,data:{...p.data,vehicleCount:parseInt(e.target.value)||0}}))} className={inp}/></F>
+      {/* Visual Edit Modal */}
+      {editingItem && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-zinc-950/40 backdrop-blur-sm" onClick={() => setEditingItem(null)} />
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95, y: 15 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden z-10 flex flex-col max-h-[85vh]"
+          >
+            <div className="px-6 py-4 border-b border-zinc-100 flex items-center justify-between bg-zinc-50">
+              <h3 className="font-extrabold text-zinc-900 text-xs uppercase tracking-wider flex items-center gap-2">
+                <Database size={14} className="text-teal-accent" /> Edit {editingItem.type === 'lead' ? 'Lead Registration' : editingItem.type === 'service' ? 'Service Ticket' : 'Customer Account'}
+              </h3>
+              <button onClick={() => setEditingItem(null)} className="p-1.5 hover:bg-zinc-250 rounded-lg text-zinc-400">
+                <X size={16} />
+              </button>
             </div>
-            <div className="flex justify-end gap-3 pt-3 border-t border-zinc-100">
-              <button type="button" onClick={()=>setEditItem(null)} className="px-4 py-2 border border-zinc-200 rounded-lg text-xs font-bold text-zinc-500 hover:bg-zinc-50">Cancel</button>
-              <button type="submit" className="px-6 py-2 bg-teal-600 text-white rounded-lg text-xs font-bold hover:bg-teal-700 shadow-md shadow-teal-600/20">Save Changes</button>
-            </div>
-          </form>
-        )}
-      </Modal>
+            
+            <form onSubmit={async (e) => {
+              e.preventDefault();
+              try {
+                if (editingItem.type === 'lead') {
+                  await axios.put(`/api/leads/${editingItem.data.id}`, editingItem.data);
+                } else if (editingItem.type === 'service') {
+                  await axios.put(`/api/services/${editingItem.data.id}`, editingItem.data);
+                } else {
+                  await axios.put(`/api/customers/${editingItem.data.id}`, editingItem.data);
+                }
+                setEditingItem(null);
+                fetchData();
+              } catch (err: any) {
+                alert("Failed to update: " + err.message);
+              }
+            }} className="p-6 overflow-y-auto space-y-4 text-xs">
+              
+              {editingItem.type === 'lead' && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Customer Name</label>
+                    <input type="text" required value={editingItem.data.customerName || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, customerName: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Contact Name</label>
+                    <input type="text" value={editingItem.data.contactName || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, contactName: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Phone</label>
+                    <input type="text" value={editingItem.data.phone || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, phone: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Email</label>
+                    <input type="email" value={editingItem.data.email || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, email: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Region</label>
+                    <select value={editingItem.data.region || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, region: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold">
+                      {REGIONS.map(r => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Status</label>
+                    <select value={editingItem.data.status || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, status: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold">
+                      {LEAD_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Implementation Type</label>
+                    <select value={editingItem.data.implementationType || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, implementationType: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold">
+                      {IMPLEMENTATION_TYPES.map(i => <option key={i} value={i}>{i}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Sales Person</label>
+                    <select value={editingItem.data.salesPerson || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, salesPerson: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold">
+                      {SALES_PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">New Qty</label>
+                    <input type="number" value={editingItem.data.newQty || 0} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, newQty: parseInt(e.target.value || '0')}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Migrate Qty</label>
+                    <input type="number" value={editingItem.data.migrateQty || 0} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, migrateQty: parseInt(e.target.value || '0')}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div className="md:col-span-2">
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Comment</label>
+                    <textarea rows={2} value={editingItem.data.comment || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, comment: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-3 text-xs font-semibold" />
+                  </div>
+                </div>
+              )}
+
+              {editingItem.type === 'service' && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Customer Name</label>
+                    <input type="text" required value={editingItem.data.customerName || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, customerName: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Status</label>
+                    <select value={editingItem.data.status || "New"} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, status: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold">
+                      {TICKET_STATUSES.map(ts => <option key={ts} value={ts}>{ts}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Qty</label>
+                    <input type="number" value={editingItem.data.quantity || 1} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, quantity: parseInt(e.target.value || '1')}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Payment Option</label>
+                    <select value={editingItem.data.payment || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, payment: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold">
+                      {PAYMENT_OPTIONS.map(po => <option key={po} value={po}>{po}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Assignee</label>
+                    <input type="text" value={editingItem.data.assignee || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, assignee: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Amount (AED)</label>
+                    <input type="text" value={editingItem.data.amount || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, amount: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div className="md:col-span-2">
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Description</label>
+                    <textarea rows={3} value={editingItem.data.description || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, description: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-3 text-xs font-semibold" />
+                  </div>
+                </div>
+              )}
+
+              {editingItem.type === 'customer' && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Company Name</label>
+                    <input type="text" required value={editingItem.data.name || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, name: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Contact Name</label>
+                    <input type="text" value={editingItem.data.contactName || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, contactName: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Phone</label>
+                    <input type="text" value={editingItem.data.phone || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, phone: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Email</label>
+                    <input type="email" value={editingItem.data.email || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, email: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Region</label>
+                    <input type="text" value={editingItem.data.region || ""} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, region: e.target.value}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">Vehicle Count</label>
+                    <input type="number" value={editingItem.data.vehicleCount || 0} onChange={e => setEditingItem({...editingItem, data: {...editingItem.data, vehicleCount: parseInt(e.target.value || '0')}})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs font-semibold" />
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-3 pt-4 border-t border-zinc-100">
+                <button type="button" onClick={() => setEditingItem(null)} className="px-4 py-2 border border-zinc-200 rounded-lg text-zinc-500 font-bold text-[10px] uppercase hover:bg-zinc-50">Cancel</button>
+                <button type="submit" className="px-6 py-2 bg-teal-accent text-white rounded-lg font-bold text-[10px] uppercase hover:opacity-95 shadow-md shadow-teal-accent/10">Save Changes</button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }
+
