@@ -1049,7 +1049,10 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
    [[SAVE_RECORD:{"type":"service","customerName":"...","description":"...","assignee":"...","amount":"...","payment":"..."}]]
 `;
 
-       // Prefer Gemini if available
+      let replyReceived = false;
+      let reply = "";
+
+      // 1. Try Gemini first if available
       if (genAI) {
         try {
           console.log("[AI Chat] Using Gemini 3.5 API with rich live DB context...");
@@ -1104,80 +1107,127 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
 
           const startTime = Date.now();
           const result = await chat.sendMessage({ message: message });
-          let reply = result.text;
+          reply = result.text;
           
           console.log(`[AI Chat] Gemini Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-          
-          // Process records
-          const savedResult = await handleAIRecordSave(reply);
-
-          await db.insert(messages).values({ role: 'assistant', content: savedResult.reply });
-          return res.json({ reply: savedResult.reply, savedRecord: savedResult.savedRecord });
+          replyReceived = true;
         } catch (geminiErr) {
-          console.error("Gemini API failed, falling back to Ollama:", (geminiErr as Error).message);
+          console.error("Gemini API failed, falling back to Groq:", (geminiErr as Error).message);
         }
       }
 
-      // Default to Ollama with the exact same rich DB Context prompt
-      let ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
-      if (!ollamaUrl.endsWith("/api/chat")) {
-        ollamaUrl = ollamaUrl.replace(/\/$/, "") + "/api/chat";
-      }
-      
-      try {
-        const ollamaOptions: any = {
-          num_ctx: parseInt(process.env.OLLAMA_NUM_CTX || "2048"),
-          num_thread: parseInt(process.env.OLLAMA_NUM_THREAD || "4"),
-        };
+      // 2. Try Groq (llama-3.1-8b-instant with specified API key) if Gemini failed or was unavailable
+      if (!replyReceived) {
+        try {
+          console.log("[AI Chat] Gemini failed or unavailable, falling back to Groq API with llama-3.1-8b-instant...");
+          const startTime = Date.now();
+          
+          // Build OpenAI-compatible messages payload
+          const groqMessages = [
+            { role: "system", content: systemInstruction }
+          ];
 
-        const gpuConfig = parseInt(process.env.OLLAMA_NUM_GPU || "-1");
-        ollamaOptions.num_gpu = gpuConfig;
-        
-        if (gpuConfig !== -1) {
-          ollamaOptions.main_gpu = 0;
+          if (Array.isArray(history)) {
+            for (const h of history) {
+              const role = h.role === "assistant" || h.role === "model" ? "assistant" : "user";
+              const content = h.content || (h.parts && h.parts[0]?.text) || "";
+              if (content.trim()) {
+                groqMessages.push({ role, content: content.trim() });
+              }
+            }
+          }
+          groqMessages.push({ role: "user", content: message });
+
+          const groqKey = process.env.GROQ_API_KEY || "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";
+          const groqResponse = await axios.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            {
+              model: "llama-3.1-8b-instant",
+              messages: groqMessages,
+              temperature: 0.2
+            },
+            {
+              headers: {
+                "Authorization": `Bearer ${groqKey}`,
+                "Content-Type": "application/json"
+              },
+              timeout: 30000
+            }
+          );
+
+          if (groqResponse.status === 200 && groqResponse.data?.choices?.[0]?.message?.content) {
+            reply = groqResponse.data.choices[0].message.content;
+            console.log(`[AI Chat] Groq Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+            replyReceived = true;
+          } else {
+            throw new Error(`Groq returned status ${groqResponse.status}`);
+          }
+        } catch (groqErr) {
+          console.error("Groq API failed, falling back to Ollama:", (groqErr as Error).message);
         }
-
-        const requestBody = {
-          model: process.env.OLLAMA_MODEL || "llama3:latest",
-          messages: [
-            { role: "system", content: systemInstruction },
-            ...history,
-            { role: "user", content: message }
-          ],
-          options: ollamaOptions,
-          keep_alive: process.env.OLLAMA_KEEP_ALIVE || "5m",
-          stream: false
-        };
-
-        console.log(`[AI Chat] START Ollama: model=${requestBody.model}, options=${JSON.stringify(ollamaOptions)}`);
-        
-        const startTime = Date.now();
-        const response = await axios.post(ollamaUrl, requestBody, { 
-          timeout: 300000,
-          validateStatus: () => true 
-        });
-
-        if (response.status !== 200) {
-          throw new Error(`Ollama returned status ${response.status}`);
-        }
-
-        console.log(`[AI Chat] Ollama Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-        let reply = response.data.message.content;
-        
-        // Process records
-        const savedResult = await handleAIRecordSave(reply);
-
-        // Save assistant message
-        await db.insert(messages).values({ role: 'assistant', content: savedResult.reply });
-        
-        res.json({ reply: savedResult.reply, savedRecord: savedResult.savedRecord });
-      } catch (ollamaErr) {
-        console.error("Ollama connection failed:", (ollamaErr as Error).message);
-        // Final fallback
-        const fallback = "I'm the SynoHub AI Assistant. I detected a temporary delay in my local processor. How can I help you manage your fleet today?";
-        await db.insert(messages).values({ role: 'assistant', content: fallback });
-        res.json({ reply: fallback, error: "AI Engine not reachable. Using fallback response." });
       }
+
+      // 3. Default to Ollama if both Gemini and Groq failed
+      if (!replyReceived) {
+        let ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
+        if (!ollamaUrl.endsWith("/api/chat")) {
+          ollamaUrl = ollamaUrl.replace(/\/$/, "") + "/api/chat";
+        }
+        
+        try {
+          const ollamaOptions: any = {
+            num_ctx: parseInt(process.env.OLLAMA_NUM_CTX || "2048"),
+            num_thread: parseInt(process.env.OLLAMA_NUM_THREAD || "6"),
+          };
+
+          const gpuConfig = parseInt(process.env.OLLAMA_NUM_GPU || "-1");
+          ollamaOptions.num_gpu = gpuConfig;
+          
+          if (gpuConfig !== -1) {
+            ollamaOptions.main_gpu = 0;
+          }
+
+          const currentOllamaModel = process.env.OLLAMA_MODEL || "qwen2.5:1.5b";
+
+          const requestBody = {
+            model: currentOllamaModel,
+            messages: [
+              { role: "system", content: systemInstruction },
+              ...history,
+              { role: "user", content: message }
+            ],
+            options: ollamaOptions,
+            keep_alive: process.env.OLLAMA_KEEP_ALIVE || "5m",
+            stream: false
+          };
+
+          console.log(`[AI Chat] START Ollama fallback: model=${requestBody.model}, options=${JSON.stringify(ollamaOptions)}`);
+          
+          const startTime = Date.now();
+          const response = await axios.post(ollamaUrl, requestBody, { 
+            timeout: 300000,
+            validateStatus: () => true 
+          });
+
+          if (response.status !== 200) {
+            throw new Error(`Ollama returned status ${response.status}`);
+          }
+
+          console.log(`[AI Chat] Ollama Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+          reply = response.data.message.content;
+          replyReceived = true;
+        } catch (ollamaErr) {
+          console.error("Ollama connection failed:", (ollamaErr as Error).message);
+          // Final fallback
+          reply = "I'm the SynoHub AI Assistant. I detected a temporary delay in my local processor. How can I help you manage your fleet today?";
+        }
+      }
+
+      // Process records
+      const savedResult = await handleAIRecordSave(reply);
+
+      await db.insert(messages).values({ role: 'assistant', content: savedResult.reply });
+      return res.json({ reply: savedResult.reply, savedRecord: savedResult.savedRecord });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -1215,6 +1265,9 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
         console.error("Failed to load prompts dynamically in /api/ingest:", err);
       }
 
+      let parsedSuccessfully = false;
+      let rawResponseContent = "";
+
       // 1. Try Gemini first if available
       if (genAI) {
         try {
@@ -1229,62 +1282,99 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
             }
           });
           console.log(`[AI Ingest] Gemini Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-          let content = response.text;
-          content = content.replace(/```json|```/g, "").trim();
-          const extracted = JSON.parse(content);
-          return res.json({ extracted });
+          rawResponseContent = response.text;
+          parsedSuccessfully = true;
         } catch (geminiErr) {
-          console.error("Gemini API failed for log extraction, falling back to Ollama:", (geminiErr as Error).message);
+          console.error("Gemini API failed for log extraction, falling back to Groq:", (geminiErr as Error).message);
         }
       }
 
-      // 2. Fall back to Ollama
-      let ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
-      if (!ollamaUrl.endsWith("/api/chat")) {
-        ollamaUrl = ollamaUrl.replace(/\/$/, "") + "/api/chat";
+      // 2. Fall back to Groq if Gemini wasn't used or failed
+      if (!parsedSuccessfully) {
+        try {
+          console.log("[AI Ingest] Falling back to Groq API block for log extraction with llama-3.1-8b-instant...");
+          const startTime = Date.now();
+          const groqKey = process.env.GROQ_API_KEY || "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";
+          const groqResponse = await axios.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            {
+              model: "llama-3.1-8b-instant",
+              messages: [
+                { role: "system", content: currentPrompts.log_extractor },
+                { role: "user", content: "Extract records from these logs:\n" + batch }
+              ],
+              temperature: 0.1
+            },
+            {
+              headers: {
+                "Authorization": `Bearer ${groqKey}`,
+                "Content-Type": "application/json"
+              },
+              timeout: 30000
+            }
+          );
+
+          if (groqResponse.status === 200 && groqResponse.data?.choices?.[0]?.message?.content) {
+            rawResponseContent = groqResponse.data.choices[0].message.content;
+            console.log(`[AI Ingest] Groq Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+            parsedSuccessfully = true;
+          } else {
+            throw new Error(`Groq returned status ${groqResponse.status}`);
+          }
+        } catch (groqErr) {
+          console.error("Groq API failed for log extraction, falling back to Ollama:", (groqErr as Error).message);
+        }
       }
 
-      const ollamaOptions: any = {
-        num_ctx: parseInt(process.env.OLLAMA_NUM_CTX || "2048"),
-        num_thread: parseInt(process.env.OLLAMA_NUM_THREAD || "4"),
-      };
+      // 3. Fall back to Ollama
+      if (!parsedSuccessfully) {
+        let ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
+        if (!ollamaUrl.endsWith("/api/chat")) {
+          ollamaUrl = ollamaUrl.replace(/\/$/, "") + "/api/chat";
+        }
 
-      // Only add GPU if explicitly set, default to -1 (auto)
-      const gpuConfig = parseInt(process.env.OLLAMA_NUM_GPU || "-1");
-      ollamaOptions.num_gpu = gpuConfig;
-      
-      if (gpuConfig !== -1) {
-        ollamaOptions.main_gpu = 0;
+        const ollamaOptions: any = {
+          num_ctx: parseInt(process.env.OLLAMA_NUM_CTX || "2048"),
+          num_thread: parseInt(process.env.OLLAMA_NUM_THREAD || "6"),
+        };
+
+        const gpuConfig = parseInt(process.env.OLLAMA_NUM_GPU || "-1");
+        ollamaOptions.num_gpu = gpuConfig;
+        
+        if (gpuConfig !== -1) {
+          ollamaOptions.main_gpu = 0;
+        }
+
+        const currentOllamaModel = process.env.OLLAMA_MODEL || "qwen2.5:1.5b";
+
+        console.log(`[AI Ingest] START: model=${currentOllamaModel}, options=${JSON.stringify(ollamaOptions)}`);
+        console.log(`[AI Ingest] URL: ${ollamaUrl}`);
+        const startTime = Date.now();
+
+        const response = await axios.post(ollamaUrl, {
+          model: currentOllamaModel,
+          messages: [
+            { role: "system", content: currentPrompts.log_extractor },
+            { role: "user", content: "Extract records from these logs:\n" + batch }
+          ],
+          options: ollamaOptions,
+          keep_alive: process.env.OLLAMA_KEEP_ALIVE || "5m",
+          stream: false
+        }, { 
+          timeout: 300000,
+          validateStatus: () => true 
+        });
+
+        if (response.status !== 200) {
+          throw new Error(`Ollama returned status ${response.status}: ${JSON.stringify(response.data)}`);
+        }
+
+        console.log(`[AI Ingest] Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+        rawResponseContent = response.data.message.content;
+        parsedSuccessfully = true;
       }
 
-      console.log(`[AI Ingest] START: model=${process.env.OLLAMA_MODEL || "llama3:latest"}, options=${JSON.stringify(ollamaOptions)}`);
-      console.log(`[AI Ingest] URL: ${ollamaUrl}`);
-      const startTime = Date.now();
-
-      const response = await axios.post(ollamaUrl, {
-        model: process.env.OLLAMA_MODEL || "llama3:latest",
-        messages: [
-          { role: "system", content: currentPrompts.log_extractor },
-          { role: "user", content: "Extract records from these logs:\n" + batch }
-        ],
-        options: ollamaOptions,
-        keep_alive: process.env.OLLAMA_KEEP_ALIVE || "5m",
-        stream: false
-      }, { 
-        timeout: 300000,
-        validateStatus: () => true 
-      });
-
-      if (response.status !== 200) {
-        throw new Error(`Ollama returned status ${response.status}: ${JSON.stringify(response.data)}`);
-      }
-
-      console.log(`[AI Ingest] Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-
-      let content = response.data.message.content;
-      // Cleanup common LLM markdown noise
-      content = content.replace(/```json|```/g, "").trim();
-      
+      let content = rawResponseContent.replace(/```json|```/g, "").trim();
       const extracted = JSON.parse(content);
       res.json({ extracted });
     } catch (error) {
