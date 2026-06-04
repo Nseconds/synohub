@@ -4,7 +4,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { db, pool } from "./src/db";
 import { customers, serviceRequests, messages } from "./src/db/schema";
-import { eq, like, or } from "drizzle-orm";
+import { eq, like, or, desc } from "drizzle-orm";
 import axios from "axios";
 import crypto from "crypto";
 import mysql from "mysql2/promise";
@@ -12,19 +12,31 @@ import fs from "fs";
 
 import { GoogleGenAI } from "@google/genai";
 
+// Helper to safely strip surrounding quotation marks from environment variables
+function cleanEnvVar(val: string | undefined): string | null {
+  if (!val) return null;
+  const trimmed = val.trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+const cleanedGeminiKey = cleanEnvVar(process.env.GEMINI_API_KEY);
+
 console.log("--- Environment Variable Sync Check ---");
 console.log("OLLAMA_URL:", process.env.OLLAMA_URL);
 console.log("OLLAMA_MODEL:", process.env.OLLAMA_MODEL);
 console.log("OLLAMA_NUM_THREAD:", process.env.OLLAMA_NUM_THREAD);
 console.log("OLLAMA_NUM_GPU:", process.env.OLLAMA_NUM_GPU);
-console.log("GEMINI_API_KEY:", process.env.GEMINI_API_KEY ? "PRESENT" : "MISSING");
+console.log("GEMINI_API_KEY:", cleanedGeminiKey ? "PRESENT" : "MISSING");
 console.log("---------------------------------------");
 
 // Initialize Gemini if key exists
 let genAI: any = null;
-if (process.env.GEMINI_API_KEY) {
+if (cleanedGeminiKey) {
   genAI = new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
+    apiKey: cleanedGeminiKey,
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',
@@ -153,209 +165,6 @@ async function initDB() {
   } catch (e) {
     console.error("Database initialization failed:", (e as Error).message);
     // Don't throw here to allow the app to attempt starting anyway
-  }
-}
-
-async function seed() {
-  try {
-    let csvPath = path.join(process.cwd(), "synohub_fleet_data.csv");
-    if (!fs.existsSync(csvPath)) {
-      csvPath = path.join(process.cwd(), "user_import.csv");
-    }
-    if (!fs.existsSync(csvPath)) {
-      console.log("No synohub_fleet_data.csv or user_import.csv found, skipping seed.");
-      return;
-    }
-
-    // Safety check: skip seeding if database is already populated
-    try {
-      const [cRows]: any = await pool.execute("SELECT COUNT(*) as count FROM customers");
-      const [srRows]: any = await pool.execute("SELECT COUNT(*) as count FROM service_requests");
-      const totalCount = (cRows[0]?.count || 0) + (srRows[0]?.count || 0);
-      if (totalCount > 0) {
-        console.log(`Database already contains ${totalCount} records. Skipping CSV seed step to preserve custom database entries.`);
-        return;
-      }
-    } catch (checkErr) {
-      console.log("Database empty check failed or table not found (proceeding to seed):", (checkErr as Error).message);
-    }
-
-    console.log(`Found CSV dataset at ${path.basename(csvPath)}. Truncating tables and seeding entire custom dataset...`);
-    try {
-      await pool.execute("TRUNCATE TABLE customers");
-      await pool.execute("TRUNCATE TABLE service_requests");
-    } catch (truncateErr) {
-      console.log("Truncate error ignored (continuing with database loading):", (truncateErr as Error).message);
-    }
-
-    const csvContent = fs.readFileSync(csvPath, "utf8");
-    const lines = csvContent.split(/\r?\n/);
-    
-    // Custom CSV parser to handle quotes and commas properly
-    function parseCSVLine(line: string): string[] {
-      const result: string[] = [];
-      let current = '';
-      let inQuotes = false;
-      for (let i = 0; i < line.length; i++) {
-        const char = line[i];
-        if (char === '"') {
-          inQuotes = !inQuotes;
-        } else if (char === ',' && !inQuotes) {
-          result.push(current);
-          current = '';
-        } else {
-          current += char;
-        }
-      }
-      result.push(current);
-      return result;
-    }
-
-    const customerMap = new Map<string, {
-      name: string;
-      contactName: string;
-      phone: string;
-      email: string;
-      region: string;
-      implementationType: string;
-      vehicleCount: number;
-    }>();
-
-    const registrationValues: any[] = [];
-    const serviceValues: any[] = [];
-
-    // Skip the headers row-0 and start parsing from i=1
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
-      
-      const cols = parseCSVLine(line);
-      if (cols.length < 13) continue;
-
-      const recordId = cols[0].replace(/["']/g, '').trim();
-      const type = cols[1].replace(/["']/g, '').trim();
-      const customerOrEntity = cols[2].replace(/["']/g, '').trim();
-      const contactPerson = cols[3].replace(/["']/g, '').trim();
-      const phone = cols[4].replace(/["']/g, '').trim();
-      const email = cols[5].replace(/["']/g, '').trim();
-      const region = cols[6].replace(/["']/g, '').trim();
-      const status = cols[7].replace(/["']/g, '').trim();
-      const quantity = parseInt(cols[8].replace(/["']/g, '').trim()) || 0;
-      const valueOrAmount = cols[9].replace(/["']/g, '').trim();
-      const salesPersonOrAssignee = cols[10].replace(/["']/g, '').trim();
-      const implementationOrDescription = cols[11].replace(/["']/g, '').trim();
-      
-      let createdAtValue = new Date();
-      if (cols[12]) {
-        const cleanDateStr = cols[12].replace(/["']/g, '').trim();
-        const d = new Date(cleanDateStr);
-        if (!isNaN(d.getTime())) {
-          createdAtValue = d;
-        }
-      }
-
-      // Track uniquely in customer map
-      const cleanCustomerName = customerOrEntity;
-      if (cleanCustomerName) {
-        if (!customerMap.has(cleanCustomerName)) {
-          customerMap.set(cleanCustomerName, {
-            name: cleanCustomerName,
-            contactName: contactPerson,
-            phone: phone,
-            email: email,
-            region: region,
-            implementationType: type === "LeadRegistration" ? implementationOrDescription : "Service Ticket",
-            vehicleCount: quantity
-          });
-        } else {
-          const current = customerMap.get(cleanCustomerName)!;
-          current.vehicleCount += quantity;
-          if (contactPerson) current.contactName = contactPerson;
-          if (phone) current.phone = phone;
-          if (email) current.email = email;
-          if (region) current.region = region;
-        }
-      }
-
-      if (type === "LeadRegistration") {
-        registrationValues.push({
-          customerName: customerOrEntity,
-          contactName: contactPerson,
-          phone: phone,
-          email: email,
-          region: region,
-          status: status || 'New Lead',
-          implementationType: implementationOrDescription,
-          salesPerson: salesPersonOrAssignee,
-          projectValue: valueOrAmount,
-          newQty: quantity,
-          createdAt: createdAtValue
-        });
-      } else if (type === "ServiceTicket") {
-        serviceValues.push({
-          ticketId: recordId,
-          customerName: customerOrEntity,
-          description: implementationOrDescription,
-          status: status || 'New',
-          quantity: quantity,
-          amount: valueOrAmount,
-          assignee: salesPersonOrAssignee,
-          createdAt: createdAtValue
-        });
-      }
-    }
-
-    // Insert in batches of 50 records
-    if (registrationValues.length > 0) {
-      console.log(`Seeding ${registrationValues.length} registrations to service_requests...`);
-      const mappedRegs = registrationValues.map(r => ({
-        customerName: r.customerName || "",
-        contactName: r.contactName || "",
-        phone: r.phone || "",
-        email: r.email || "",
-        region: r.region || "",
-        status: r.status || "New Lead",
-        implementationType: r.implementationType || "",
-        salesPerson: r.salesPerson || "",
-        projectValue: r.projectValue || "",
-        newQty: r.newQty || 0,
-        createdAt: r.createdAt ? r.createdAt.toISOString().substring(0, 10) : new Date().toISOString().substring(0, 10)
-      }));
-      for (let i = 0; i < mappedRegs.length; i += 50) {
-        const chunk = mappedRegs.slice(i, i + 50);
-        await db.insert(serviceRequests).values(chunk);
-      }
-    }
-
-    if (serviceValues.length > 0) {
-      console.log(`Seeding ${serviceValues.length} services to service_requests...`);
-      const mappedServices = serviceValues.map(s => ({
-        customerName: s.customerName || "",
-        issueDescription: s.description || "",
-        jobStatus: s.status || "Pending",
-        newQty: s.quantity || 1,
-        amount: s.amount || "",
-        salesPerson: s.assignee || "",
-        createdAt: s.createdAt ? s.createdAt.toISOString().substring(0, 10) : new Date().toISOString().substring(0, 10)
-      }));
-      for (let i = 0; i < mappedServices.length; i += 50) {
-        const chunk = mappedServices.slice(i, i + 50);
-        await db.insert(serviceRequests).values(chunk);
-      }
-    }
-
-    if (customerMap.size > 0) {
-      const customersToInsert = Array.from(customerMap.values());
-      console.log(`Seeding ${customersToInsert.length} summarized customers...`);
-      for (let i = 0; i < customersToInsert.length; i += 50) {
-        const chunk = customersToInsert.slice(i, i + 50);
-        await db.insert(customers).values(chunk);
-      }
-    }
-
-    console.log("Database initialized and loaded with raw CSV dataset successfully.");
-  } catch (e) {
-    console.error("CSV Seeding failed:", (e as Error).message);
   }
 }
 
@@ -608,7 +417,6 @@ async function startServer() {
 
   try {
     await initDB();
-    await seed();
   } catch (err) {
     console.error("Critical: Could not initialize database. App may fail.", err);
   }
@@ -964,12 +772,49 @@ async function startServer() {
       // Save user message
       await db.insert(messages).values({ role: 'user', content: message });
 
-      // Fetch live DB Context
-      const allCustomers = await db.select().from(customers);
-      const allRequests = await db.select().from(serviceRequests);
+      // Fetch live DB Context (limiting to 40 recent items to prevent huge payload errors such as HTTP 413)
+      let fetchedCustomers = await db.select().from(customers).orderBy(desc(customers.id)).limit(40);
+      let fetchedRequests = await db.select().from(serviceRequests).orderBy(desc(serviceRequests.id)).limit(40);
+
+      // Extract unique alphanumeric keywords from the message to also search older records dynamically
+      const keywords = message.toLowerCase()
+        .replace(/[^a-z0-9\s]/g, "")
+        .split(/\s+/)
+        .filter((w: string) => w.length >= 4 && !["what", "show", "list", "with", "this", "that", "please", "lead", "ticket", "status", "save", "update", "customer", "service", "active", "queue", "info", "record", "from"].includes(w));
+
+      if (keywords.length > 0) {
+        try {
+          // Perform targeted searches to pull in older records if they are explicitly mentioned
+          for (const word of keywords) {
+            const extraCustomers = await db.select().from(customers).where(or(
+              like(customers.name, `%${word}%`),
+              like(customers.contactName, `%${word}%`)
+            ));
+            for (const c of extraCustomers) {
+              if (!fetchedCustomers.some(fc => fc.id === c.id)) {
+                fetchedCustomers.push(c);
+              }
+            }
+
+            const extraRequests = await db.select().from(serviceRequests).where(or(
+              like(serviceRequests.customerName, `%${word}%`),
+              like(serviceRequests.contactName, `%${word}%`),
+              like(serviceRequests.issueDescription, `%${word}%`),
+              like(serviceRequests.comment, `%${word}%`)
+            ));
+            for (const r of extraRequests) {
+              if (!fetchedRequests.some(fr => fr.id === r.id)) {
+                fetchedRequests.push(r);
+              }
+            }
+          }
+        } catch (searchError) {
+          console.error("Dynamic keyword DB search failed, continuing with cached subset:", (searchError as Error).message);
+        }
+      }
 
       // Map requests for lead registrations context description
-      const allRegistrations = allRequests.map(r => ({
+      const allRegistrations = fetchedRequests.map(r => ({
         id: r.id,
         customerName: r.customerName || "",
         contactName: r.contactName || "",
@@ -979,7 +824,7 @@ async function startServer() {
       }));
 
       // Map requests for technical services context description
-      const allServices = allRequests.map(s => ({
+      const allServices = fetchedRequests.map(s => ({
         id: s.id,
         customerName: s.customerName || "",
         description: s.issueDescription || s.notes || s.comment || "",
@@ -992,7 +837,7 @@ async function startServer() {
       const dbContextStr = `
 CURRENT CRM DATABASE RECORDS:
  --- Customers ---
-${allCustomers.map((c: any) => ` * ID: ${c.id} | Name: "${c.name}" | Contact Person: "${c.contactName || ''}" | Phone: "${c.phone || ''}" | Region: "${c.region || ''}" | Vehicles count: ${c.vehicleCount || 0}`).join('\n')}
+${fetchedCustomers.map((c: any) => ` * ID: ${c.id} | Name: "${c.name}" | Contact Person: "${c.contactName || ''}" | Phone: "${c.phone || ''}" | Region: "${c.region || ''}" | Vehicles count: ${c.vehicleCount || 0}`).join('\n')}
 
 --- Lead Registrations ---
 ${allRegistrations.map((r: any) => ` * ID: ${r.id} | Customer: "${r.customerName}" | Contact Person: "${r.contactName || ''}" | Region: "${r.region || ''}" | Location: "${r.location || ''}" | Status: "${r.status || 'New Lead'}"`).join('\n')}
@@ -1018,8 +863,9 @@ ${dbContextStr}
 
 CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
 1. ACT HUMAN & OPERATIONAL: Reply like a human sales or fleets officer in Dubai of Synosys Fleet Intelligence. Keep conversations natural, friendly, highly custom, and warm. Use phrases like "Oh, let me look that up!", "Great, Vishnu!", or "Welcome back."
-2. DYNAMIC LOOKUP & MULTI-BRANCH CLARIFICATION:
-   - When a user enters a customer or company name (such as "Clymate", "Clymet", "Inspirentals"), check the lists of active CRM Customers, Lead Registrations, and Services in the CURRENT CRM DATABASE RECORDS above.
+2. DYNAMIC LOOKUP, MATCH CLARIFICATION & NEW CUSTOMER CHECK (CRITICAL):
+   - When a user enters a customer or company name (such as "klee", "kleemol", "crescent", "clymate"), check the lists of active CRM Customers, Lead Registrations, and Services in the CURRENT CRM DATABASE RECORDS above.
+   - If the name provided is only a partial match (e.g. they entered "klee" or "kleemol" which might match "KLEEMOL CAR RENTAL", or any abbreviation or partial spelling), you MUST NOT immediately assume they mean that existing customer. You MUST explicitly ask a clarification or confirmation question to find out if they are referring to that existing entity, or if this is a completely brand-new customer with a similar name.
    - If there are MULTIPLE similar/matching records in the database (e.g. searching for "Clymate" or "Clymet" matches Clymate Logistics, Clymate Technical Services, Clymate Transport, etc., or multiple branches of Inspirentals), STOP immediately. Do NOT register or default to a single choice, and do NOT output a SAVE block yet.
    - You MUST dynamically parse the active database context, list the ACTUAL matching records clearly with their details (database ID, customer name, region, and location if available), and ask the user to clarify which specific search result they mean, or if they are registering a brand-new entity entirely.
    - Example format you should use for listing live matches:
@@ -1028,7 +874,7 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
      - Clymate Logistics (ID: #1002, Region: Abu Dhabi, Location: KIZAD)
      - Clymate Technical Services (ID: #1003, Region: Abu Dhabi, Location: Musaffah)
      - Clymate Transport (ID: #1004, Region: Dubai, Location: Al Quoz)"
-   - Always list the REAL matching records found in CURRENT CRM DATABASE RECORDS. Do not invent simulated entities if they are not in the context string.
+   - Always list the REAL matching records found in CURRENT CRM DATABASE RECORDS. Do not invent simulated entries if they are not in the context string.
 3. MANDATORY ALIGNED KEY-VALUE DISPLAY FORMAT:
    - When representing, summarizing, displaying, or confirming any Lead Registration or Service Ticket record (whether creating or updating), you MUST output exactly this aligned block format:
      Service Type       : [Service / Implementation Type here, e.g. LOCATOR]
@@ -1047,6 +893,20 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
    [[SAVE_RECORD:{"type":"registration","customerName":"...","contactName":"...","phone":"...","email":"...","region":"...","implementationType":"...","status":"New Lead","salesType":"Existing","requestedPerson":"...","comment":"...","qty":1}]]
    OR if it is a service ticket save:
    [[SAVE_RECORD:{"type":"service","customerName":"...","description":"...","assignee":"...","amount":"...","payment":"..."}]]
+ 6. DYNAMIC STAFF REGISTRATION, INTRODUCTIONS & NAME ANOMALIES (CRITICAL):
+   - Under no circumstances should you treat a name introduction (such as "iam feros", "iaam sharnag", "i am athul", "this is nishad", etc.) as a standard generic greetings chat (do NOT reply with a basic "Hello Feros! How can I assist you today?" or default chatbot intro).
+   - If the user introduces themselves with a name that is not in the original staff list (e.g., "feros" or "sharnag"), you must recognize that they are registering a brand-new staff coordinator. Acknowledge them warmly as a newly registered fleet coordinator in Dubai, but let them know registration requires confirmation from their side (which is prompted in the user interface), and once confirmed, all subsequent requests/drafts in this session will default to them as the Requested Person.
+   - ABSOLUTE PROHIBITION ON ASSIGNING UNREGISTERED STAFF AS REQUESTED PERSON: You are strictly forbidden from assigning, defaulting, mapping, or adding any person as the Requested Person if they are not in the active requested person list (the list of default allowed staff or dynamically registered and confirmed staff). Under no circumstances should you say "The requested person for this registration is you" or similar phrases for unregistered/unauthorized people (who are not in the requested handoff list). If the user asks "who are the requested person" or similar, you must list the allowed registered staff members from the allowed list: Ajmal, Amrutha, Athul, Celine, Deepak, Faizal, Ivy, Midhun, Mohamed Musthafa, Naseeb, Nishad, Rasick, Reyn, Shamnad, Shams, Shyamjith, or any dynamically confirmed and registered staff in the session.
+   - If you asked who the requested person is, and they answer with any name (even if misspelled, new, or absent from the default list, such as "sharnag" or "feros"), you MUST accept it instantly without apologizing or asking for a retry. Do NOT say you don't recognize the name or ask them to choose again. Accept it as a newly registered staff member/coordinator, output a success confirmation, complete the draft record by mapping that name strictly to "requested_person", display the completed record in the aligned key-value format, and output the corresponding [[SAVE_RECORD:...]] block.
+7. SINGLE STAFF NAME ANSWERS CONTEXT PRESERVATION (CRITICAL):
+   - Under no circumstances should you treat a single staff member's name (e.g. "Athul", "Celine", "Nishad", "Midhun", "Faizal", "Rasick", "Shamnad", etc.) as a generic greeting or introduction (e.g. do NOT say "Hello Athul! How can I assist you today?" or "Nice to meet you").
+   - If you asked the user to specify who requested the ticket/lead (the staff/Requested Person), and they reply with a name from the allowed staff list (such as "athul"), you MUST recognize that they are providing the requested_person or sales_person for the CRM ticket or registration currently being drafted in the chat history.
+   - Do NOT reset the conversation or lose context. Proceed immediately to complete the draft ticket or lead registration, map the provided name to "requested_person", display the finalized ticket details in the mandatory aligned key-value format block (with unbolded text, i.e., NO double asterisks "**"), and append the complete corresponding [[SAVE_RECORD:...]] block.
+8. NEW SESSION/REQUEST STAFF NAME CLARIFICATION (EXPLICIT SESSIONS OVER COLD CARRIES):
+   - When a new chat message arrives initiating a separate request, or when a user begins a completely new service ticket or lead registration task, you MUST NOT implicitly carry over the 'Requested Person' from a previous conversation task or from history.
+   - For example, if a previous service ticket was requested by "Athul", and now the user has started a new request (e.g., "create a service for customer crescent tomorrow"), do NOT default or assume that the requested person is "Athul" again.
+   - You MUST explicitly ask the user who requested the ticket: "Who is the Requested Person (staff) for this request? Is it still Athul or someone else from our staff list (e.g., Faizal, Celine, Amrutha, Midhun, etc.)?" unless they provide the staff name explicitly within the prompt of this new request. Justify that you need to clarify since the requester may have changed since the last task.
+
 `;
 
       let replyReceived = false;
@@ -1112,62 +972,11 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
           console.log(`[AI Chat] Gemini Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
           replyReceived = true;
         } catch (geminiErr) {
-          console.error("Gemini API failed, falling back to Groq:", (geminiErr as Error).message);
+          console.error("Gemini API failed, falling back to Ollama:", (geminiErr as Error).message);
         }
       }
 
-      // 2. Try Groq (llama-3.1-8b-instant with specified API key) if Gemini failed or was unavailable
-      if (!replyReceived) {
-        try {
-          console.log("[AI Chat] Gemini failed or unavailable, falling back to Groq API with llama-3.1-8b-instant...");
-          const startTime = Date.now();
-          
-          // Build OpenAI-compatible messages payload
-          const groqMessages = [
-            { role: "system", content: systemInstruction }
-          ];
-
-          if (Array.isArray(history)) {
-            for (const h of history) {
-              const role = h.role === "assistant" || h.role === "model" ? "assistant" : "user";
-              const content = h.content || (h.parts && h.parts[0]?.text) || "";
-              if (content.trim()) {
-                groqMessages.push({ role, content: content.trim() });
-              }
-            }
-          }
-          groqMessages.push({ role: "user", content: message });
-
-          const groqKey = process.env.GROQ_API_KEY || "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";
-          const groqResponse = await axios.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            {
-              model: "llama-3.1-8b-instant",
-              messages: groqMessages,
-              temperature: 0.2
-            },
-            {
-              headers: {
-                "Authorization": `Bearer ${groqKey}`,
-                "Content-Type": "application/json"
-              },
-              timeout: 30000
-            }
-          );
-
-          if (groqResponse.status === 200 && groqResponse.data?.choices?.[0]?.message?.content) {
-            reply = groqResponse.data.choices[0].message.content;
-            console.log(`[AI Chat] Groq Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-            replyReceived = true;
-          } else {
-            throw new Error(`Groq returned status ${groqResponse.status}`);
-          }
-        } catch (groqErr) {
-          console.error("Groq API failed, falling back to Ollama:", (groqErr as Error).message);
-        }
-      }
-
-      // 3. Default to Ollama if both Gemini and Groq failed
+      // 2. Default to Ollama if Gemini failed or was unavailable
       if (!replyReceived) {
         let ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
         if (!ollamaUrl.endsWith("/api/chat")) {
@@ -1285,48 +1094,11 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
           rawResponseContent = response.text;
           parsedSuccessfully = true;
         } catch (geminiErr) {
-          console.error("Gemini API failed for log extraction, falling back to Groq:", (geminiErr as Error).message);
+          console.error("Gemini API failed for log extraction, falling back to Ollama:", (geminiErr as Error).message);
         }
       }
 
-      // 2. Fall back to Groq if Gemini wasn't used or failed
-      if (!parsedSuccessfully) {
-        try {
-          console.log("[AI Ingest] Falling back to Groq API block for log extraction with llama-3.1-8b-instant...");
-          const startTime = Date.now();
-          const groqKey = process.env.GROQ_API_KEY || "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";
-          const groqResponse = await axios.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            {
-              model: "llama-3.1-8b-instant",
-              messages: [
-                { role: "system", content: currentPrompts.log_extractor },
-                { role: "user", content: "Extract records from these logs:\n" + batch }
-              ],
-              temperature: 0.1
-            },
-            {
-              headers: {
-                "Authorization": `Bearer ${groqKey}`,
-                "Content-Type": "application/json"
-              },
-              timeout: 30000
-            }
-          );
-
-          if (groqResponse.status === 200 && groqResponse.data?.choices?.[0]?.message?.content) {
-            rawResponseContent = groqResponse.data.choices[0].message.content;
-            console.log(`[AI Ingest] Groq Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-            parsedSuccessfully = true;
-          } else {
-            throw new Error(`Groq returned status ${groqResponse.status}`);
-          }
-        } catch (groqErr) {
-          console.error("Groq API failed for log extraction, falling back to Ollama:", (groqErr as Error).message);
-        }
-      }
-
-      // 3. Fall back to Ollama
+      // 2. Fall back to Ollama if Gemini failed or was unavailable
       if (!parsedSuccessfully) {
         let ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
         if (!ollamaUrl.endsWith("/api/chat")) {

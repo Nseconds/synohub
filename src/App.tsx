@@ -132,7 +132,7 @@ const StatCard = ({ label, value, icon: Icon, color, subValue }: { label: string
 
 
 
-const ChatInterface = ({ onRecordSaved }: { onRecordSaved?: (savedRecord?: any) => void }) => {
+const ChatInterface = ({ onRecordSaved, onNewStaffDetected }: { onRecordSaved?: (savedRecord?: any) => void, onNewStaffDetected?: (name: string) => void }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -164,12 +164,29 @@ const ChatInterface = ({ onRecordSaved }: { onRecordSaved?: (savedRecord?: any) 
     setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
     setLoading(true);
 
+    // Extract newly introduced staff name
+    const introMatch = userMsg.match(/(?:i\s*a+m|i'm|ia+m|ia+am|my\s+name\s+is|this\s+is)\s+([a-zA-Z]{3,20})/i);
+    if (introMatch && introMatch[1]) {
+      const potentialName = introMatch[1].trim();
+      const capitalized = potentialName.charAt(0).toUpperCase() + potentialName.slice(1).toLowerCase();
+      if (onNewStaffDetected) {
+        onNewStaffDetected(capitalized);
+      }
+    }
+
     try {
       const history = messages.slice(-5).map(m => ({ role: m.role, content: m.content }));
       const res = await axios.post("/api/chat", { message: userMsg, history });
       setMessages(prev => [...prev, { role: 'assistant', content: res.data.reply }]);
-      if (onRecordSaved) {
-        onRecordSaved(res.data.savedRecord);
+      if (res.data.savedRecord) {
+        if (onRecordSaved) {
+          onRecordSaved(res.data.savedRecord);
+        }
+        if (res.data.savedRecord.requestedPerson && onNewStaffDetected) {
+          const p = res.data.savedRecord.requestedPerson.trim();
+          const capitalized = p.charAt(0).toUpperCase() + p.slice(1).toLowerCase();
+          onNewStaffDetected(capitalized);
+        }
       }
     } catch (e) {
       setMessages(prev => [...prev, { role: 'assistant', content: "I'm experiencing high traffic. Please try again in 30s." }]);
@@ -182,12 +199,30 @@ const ChatInterface = ({ onRecordSaved }: { onRecordSaved?: (savedRecord?: any) 
     if (loading) return;
     setMessages(prev => [...prev, { role: 'user', content: promptText }]);
     setLoading(true);
+
+    // Extract newly introduced staff name from preset click if any
+    const introMatch = promptText.match(/(?:i\s*a+m|i'm|ia+m|ia+am|my\s+name\s+is|this\s+is)\s+([a-zA-Z]{3,20})/i);
+    if (introMatch && introMatch[1]) {
+      const potentialName = introMatch[1].trim();
+      const capitalized = potentialName.charAt(0).toUpperCase() + potentialName.slice(1).toLowerCase();
+      if (onNewStaffDetected) {
+        onNewStaffDetected(capitalized);
+      }
+    }
+
     try {
       const history = messages.slice(-5).map(m => ({ role: m.role, content: m.content }));
       const res = await axios.post("/api/chat", { message: promptText, history });
       setMessages(prev => [...prev, { role: 'assistant', content: res.data.reply }]);
-      if (onRecordSaved) {
-        onRecordSaved(res.data.savedRecord);
+      if (res.data.savedRecord) {
+        if (onRecordSaved) {
+          onRecordSaved(res.data.savedRecord);
+        }
+        if (res.data.savedRecord.requestedPerson && onNewStaffDetected) {
+          const p = res.data.savedRecord.requestedPerson.trim();
+          const capitalized = p.charAt(0).toUpperCase() + p.slice(1).toLowerCase();
+          onNewStaffDetected(capitalized);
+        }
       }
     } catch (e) {
       setMessages(prev => [...prev, { role: 'assistant', content: "I'm experiencing high traffic. Please try again in 30s." }]);
@@ -284,6 +319,9 @@ const ChatInterface = ({ onRecordSaved }: { onRecordSaved?: (savedRecord?: any) 
 
 export default function App() {
   const [activeTab, setActiveTab ] = useState<string>("overview");
+  const [requestedPeopleList, setRequestedPeopleList] = useState<string[]>(REQUESTED_PEOPLE);
+  const [defaultRequestedPerson, setDefaultRequestedPerson] = useState<string>("");
+  const [pendingStaffName, setPendingStaffName] = useState<string | null>(null);
   const [data, setData] = useState<{ registrations: Registration[], services: ServiceTicket[], customers: Customer[] }>({ 
     registrations: [], services: [], customers: [] 
   });
@@ -338,7 +376,7 @@ export default function App() {
     projectValue: "",
     priceDetails: "",
     accessories: "",
-    requestedPerson: ""
+    requestedPerson: defaultRequestedPerson
   });
 
   const [ticketForm, setTicketForm] = useState<Partial<ServiceTicket>>({
@@ -346,7 +384,8 @@ export default function App() {
     payment: PAYMENT_OPTIONS[0],
     invoiceStatus: INVOICE_STATUSES[0],
     paymentStatus: PAYMENT_STATUSES[0],
-    quantity: 1
+    quantity: 1,
+    requestedPerson: defaultRequestedPerson
   });
 
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -378,7 +417,7 @@ export default function App() {
       projectValue: "",
       priceDetails: "",
       accessories: "",
-      requestedPerson: ""
+      requestedPerson: defaultRequestedPerson
     });
     setSelectedLeadId(null);
     setShowSuggestions(false);
@@ -480,7 +519,7 @@ export default function App() {
           implementationType: cust.implementationType || IMPLEMENTATION_TYPES[0],
           source: "Company Lead",
           status: "New Lead",
-          requestedPerson: "",
+          requestedPerson: defaultRequestedPerson,
           salesType: "New"
         }));
         showToast(`No lead found. Ready to create a new lead for customer: ${cust.name}`);
@@ -495,7 +534,14 @@ export default function App() {
       setIsTicketModalOpen(false);
       fetchData();
       showToast(`Service ticket created successfully!`);
-      setTicketForm({ status: 'New', payment: PAYMENT_OPTIONS[0], invoiceStatus: INVOICE_STATUSES[0], paymentStatus: PAYMENT_STATUSES[0], quantity: 1 });
+      setTicketForm({ 
+        status: 'New', 
+        payment: PAYMENT_OPTIONS[0], 
+        invoiceStatus: INVOICE_STATUSES[0], 
+        paymentStatus: PAYMENT_STATUSES[0], 
+        quantity: 1,
+        requestedPerson: defaultRequestedPerson
+      });
     } catch (err) {
       showToast("Failed to create service ticket", "error");
     }
@@ -512,6 +558,37 @@ export default function App() {
       const res = await axios.get("/api/data");
       setData(res.data);
       setDbError(null);
+
+      // Extract dynamic requestedPerson and append to listed people if missing
+      const dbRequestedPeople = new Set<string>();
+      if (res.data.registrations && Array.isArray(res.data.registrations)) {
+        res.data.registrations.forEach((r: any) => {
+          if (r.requestedPerson && r.requestedPerson.trim()) {
+            dbRequestedPeople.add(r.requestedPerson.trim());
+          }
+        });
+      }
+      if (res.data.services && Array.isArray(res.data.services)) {
+        res.data.services.forEach((s: any) => {
+          if (s.requestedPerson && s.requestedPerson.trim()) {
+            dbRequestedPeople.add(s.requestedPerson.trim());
+          }
+        });
+      }
+
+      if (dbRequestedPeople.size > 0) {
+        setRequestedPeopleList(prev => {
+          const merged = [...prev];
+          dbRequestedPeople.forEach(person => {
+            const trimmed = person.trim();
+            const capitalized = trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+            if (capitalized && !merged.some(p => p.toLowerCase() === capitalized.toLowerCase())) {
+              merged.push(capitalized);
+            }
+          });
+          return merged;
+        });
+      }
     } catch (e: any) {
       console.error("Data fetch failed", e);
       if (e.response && e.response.data) {
@@ -750,7 +827,7 @@ export default function App() {
                         <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Requested Person</label>
                         <select value={leadForm.requestedPerson} onChange={e => setLeadForm({...leadForm, requestedPerson: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50">
                             <option value="">Select requested person</option>
-                            {REQUESTED_PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
+                            {requestedPeopleList.map(p => <option key={p} value={p}>{p}</option>)}
                         </select>
                     </div>
                     <div className="grid grid-cols-4 gap-2 text-center">
@@ -813,7 +890,7 @@ export default function App() {
                             <label className="block text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Requested Person</label>
                             <select value={ticketForm.requestedPerson} onChange={e => setTicketForm({...ticketForm, requestedPerson: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-2 text-xs focus:outline-none focus:border-teal-accent/50">
                                 <option value="">Select requested person</option>
-                                {REQUESTED_PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
+                                {requestedPeopleList.map(p => <option key={p} value={p}>{p}</option>)}
                             </select>
                         </div>
                     </div>
@@ -1179,7 +1256,7 @@ export default function App() {
                         <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Requested Person: <span className="text-red-500">*</span></label>
                         <select required value={leadForm.requestedPerson} onChange={e => setLeadForm({...leadForm, requestedPerson: e.target.value})} className="w-full bg-white border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none h-8">
                           <option value="">Select requested person</option>
-                          {REQUESTED_PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
+                          {requestedPeopleList.map(p => <option key={p} value={p}>{p}</option>)}
                         </select>
                       </div>
                     </div>
@@ -1991,7 +2068,7 @@ export default function App() {
                         <label className="text-[10px] text-zinc-500 flex items-center gap-0.5">Requested Person: <span className="text-red-500">*</span></label>
                         <select required value={leadForm.requestedPerson} onChange={e => setLeadForm({...leadForm, requestedPerson: e.target.value})} className="w-full bg-[#F1F5F9] border border-[#E2E8F0] rounded px-3 py-1.5 text-[11px] text-zinc-600 focus:outline-none">
                           <option value="">Select requested person</option>
-                          {REQUESTED_PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
+                          {requestedPeopleList.map(p => <option key={p} value={p}>{p}</option>)}
                         </select>
                       </div>
                     </div>
@@ -2038,8 +2115,14 @@ export default function App() {
                   <h3 className="text-2xl font-bold text-zinc-900 tracking-tight">SynoHub Cloud Intelligence</h3>
                   <p className="text-sm text-zinc-500 mt-2">Manage your entire fleet via cognitive automation.</p>
                 </div>
-                <ChatInterface onRecordSaved={(savedRecord) => {
-                  fetchData();
+                <ChatInterface 
+                  onNewStaffDetected={(name) => {
+                    if (!requestedPeopleList.some(p => p.toLowerCase() === name.toLowerCase())) {
+                      setPendingStaffName(name);
+                    }
+                  }}
+                  onRecordSaved={(savedRecord) => {
+                    fetchData();
                   if (savedRecord && savedRecord.type === "registration") {
                     const findOptionMatch = (value: string | undefined, list: string[], defaultValue?: string): string => {
                       if (!value) return defaultValue !== undefined ? defaultValue : list[0];
@@ -2065,7 +2148,7 @@ export default function App() {
                       implementationType: findOptionMatch(savedRecord.implementationType, IMPLEMENTATION_TYPES, "LOCATOR"),
                       salesPerson: findOptionMatch(savedRecord.salesPerson, SALES_PEOPLE, "Nishad"),
                       salesType: findOptionMatch(savedRecord.salesType, SALES_TYPES, "New"),
-                      requestedPerson: findOptionMatch(savedRecord.requestedPerson, REQUESTED_PEOPLE),
+                      requestedPerson: findOptionMatch(savedRecord.requestedPerson, requestedPeopleList),
                       comment: savedRecord.comment || "",
                       projectValue: savedRecord.projectValue || "",
                       priceDetails: savedRecord.priceDetails || "",
@@ -2255,6 +2338,72 @@ export default function App() {
                 <button type="submit" className="px-6 py-2 bg-teal-accent text-white rounded-lg font-bold text-[10px] uppercase hover:opacity-95 shadow-md shadow-teal-accent/10">Save Changes</button>
               </div>
             </form>
+          </motion.div>
+        </div>
+      )}
+
+      {/* Dynamic Staff Registration Confirmation Modal */}
+      {pendingStaffName && (
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-zinc-950/40 backdrop-blur-sm" onClick={() => setPendingStaffName(null)} />
+          <motion.div 
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.95, opacity: 0 }}
+            className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 border border-zinc-100 z-10"
+          >
+            <div className="flex items-center gap-3 text-[#0EA5E9] mb-4">
+              <div className="w-10 h-10 rounded-full bg-sky-50 flex items-center justify-center">
+                <Zap size={20} className="text-[#0EA5E9]" />
+              </div>
+              <h3 className="text-lg font-bold text-zinc-900">New Staff Coordinator Detected</h3>
+            </div>
+            
+            <p className="text-xs text-zinc-600 mb-6 leading-relaxed">
+              We detected a self-introduction from <strong className="text-zinc-900 font-semibold">{pendingStaffName}</strong> in the conversation.
+              Would you like to register them as a new SynoHub Fleet Coordinator, update all CRM dropdown forms with their name, and default newly drafted lead registrations or service tickets to them as the Requested Person?
+            </p>
+
+            <div className="flex gap-3 justify-end text-[11px]">
+              <button 
+                type="button"
+                onClick={() => {
+                  const name = pendingStaffName;
+                  setPendingStaffName(null);
+                  showToast(`Registration cancelled for "${name}".`, "error");
+                }}
+                className="px-4 py-2 border border-zinc-200 hover:bg-zinc-50 rounded-lg font-bold text-zinc-600 transition"
+              >
+                No, Cancel
+              </button>
+              <button 
+                type="button"
+                onClick={() => {
+                  const name = pendingStaffName;
+                  setPendingStaffName(null);
+                  
+                  // Dynamically register in list
+                  setRequestedPeopleList(prev => {
+                    if (!prev.some(p => p.toLowerCase() === name.toLowerCase())) {
+                      return [...prev, name];
+                    }
+                    return prev;
+                  });
+
+                  // Defaults subsequent lead registrations or service tickets to them as the Requested Person
+                  setDefaultRequestedPerson(name);
+                  
+                  // Pre-populate actual forms
+                  setLeadForm(prev => ({ ...prev, requestedPerson: name }));
+                  setTicketForm(prev => ({ ...prev, requestedPerson: name }));
+
+                  showToast(`"${name}" is now dynamically registered and set as your session default coordinator!`, "success");
+                }}
+                className="px-4 py-2 bg-[#0EA5E9] hover:bg-[#0284C7] text-white rounded-lg font-bold shadow-sm transition"
+              >
+                Yes, Register Coordinator
+              </button>
+            </div>
           </motion.div>
         </div>
       )}
