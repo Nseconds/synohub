@@ -27,6 +27,7 @@ axios.interceptors.response.use((response) => response, (error) => {
   if (error.response?.status === 401) {
     try {
       localStorage.removeItem("synohub-user");
+      window.dispatchEvent(new Event("synohub-auth-expired"));
     } catch {
       // Ignore unavailable storage.
     }
@@ -386,6 +387,8 @@ export default function App() {
           typeof parsed === "object" &&
           typeof parsed.name === "string" &&
           typeof parsed.role === "string" &&
+          typeof parsed.token === "string" &&
+          parsed.token.length > 0 &&
           (parsed.role === "admin" || parsed.role === "staff" || parsed.role === "guest")
         ) {
           return parsed;
@@ -533,6 +536,16 @@ export default function App() {
       }
     }
   }, [user]);
+
+  useEffect(() => {
+    const handleAuthExpired = () => {
+      setUser(null);
+      setActiveTab("new-form");
+      setLoading(false);
+    };
+    window.addEventListener("synohub-auth-expired", handleAuthExpired);
+    return () => window.removeEventListener("synohub-auth-expired", handleAuthExpired);
+  }, []);
 
   // Safe reset when tab is switched
   useEffect(() => {
@@ -777,9 +790,6 @@ export default function App() {
             setActiveTab("overview");
           }
           showToast(`Welcome back, ${loggedUser.name}!`);
-          setTimeout(() => {
-            fetchData();
-          }, 100);
         }} 
         onProceedAsGuest={async () => {
           const res = await axios.post("/api/guest-session");
