@@ -104,6 +104,18 @@ const PAYMENT_OPTIONS = ["Applicable", "Not Applicable"];
 const INVOICE_STATUSES = ["Not Invoiced", "Invoiced"];
 const PAYMENT_STATUSES = ["Not Paid", "Paid"];
 
+const isValidStoredUser = (value: any): value is { name: string; role: string; token: string } => {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    typeof value.name === "string" &&
+    typeof value.role === "string" &&
+    typeof value.token === "string" &&
+    value.token.length > 0 &&
+    (value.role === "admin" || value.role === "staff" || value.role === "guest")
+  );
+};
+
 const Modal = ({ isOpen, onClose, title, children }: { isOpen: boolean, onClose: () => void, title: string, children: React.ReactNode }) => (
   <AnimatePresence>
     {isOpen && (
@@ -382,15 +394,7 @@ export default function App() {
       const saved = localStorage.getItem("synohub-user");
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (
-          parsed &&
-          typeof parsed === "object" &&
-          typeof parsed.name === "string" &&
-          typeof parsed.role === "string" &&
-          typeof parsed.token === "string" &&
-          parsed.token.length > 0 &&
-          (parsed.role === "admin" || parsed.role === "staff" || parsed.role === "guest")
-        ) {
+        if (isValidStoredUser(parsed)) {
           return parsed;
         } else {
           localStorage.removeItem("synohub-user");
@@ -409,7 +413,7 @@ export default function App() {
       const saved = localStorage.getItem("synohub-user");
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (parsed && parsed.role && parsed.role !== "guest") {
+        if (isValidStoredUser(parsed) && parsed.role !== "guest") {
           return "overview";
         }
       }
@@ -804,6 +808,13 @@ export default function App() {
   }
 
   const handleLoginSuccessRecovery = (loggedUser: any) => {
+    if (!isValidStoredUser(loggedUser)) {
+      try {
+        localStorage.removeItem("synohub-user");
+      } catch (e) {}
+      setUser(null);
+      return;
+    }
     try {
       localStorage.setItem("synohub-user", JSON.stringify(loggedUser));
     } catch (e) {}

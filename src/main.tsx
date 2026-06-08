@@ -16,6 +16,21 @@ const renderStaticMessage = (title: string, detail: string) => {
   `;
 };
 
+window.addEventListener('error', (event) => {
+  renderStaticMessage(
+    'SynoHub could not start',
+    event.error instanceof Error ? event.error.message : event.message || 'A browser runtime error stopped the app.'
+  );
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  const reason = event.reason;
+  renderStaticMessage(
+    'SynoHub could not start',
+    reason instanceof Error ? reason.message : String(reason || 'A browser promise error stopped the app.')
+  );
+});
+
 renderStaticMessage(
   'Loading SynoHub...',
   'If this message stays, the React app module did not mount. Open the browser console for the first red error.'
@@ -73,13 +88,21 @@ if (!rootElement) {
 
 import('./App.tsx')
   .then(({ default: App }) => {
-    createRoot(rootElement).render(
-      <StrictMode>
-        <ErrorBoundary>
-          <App />
-        </ErrorBoundary>
-      </StrictMode>,
-    );
+    try {
+      createRoot(rootElement).render(
+        <StrictMode>
+          <ErrorBoundary>
+            <App />
+          </ErrorBoundary>
+        </StrictMode>,
+      );
+    } catch (error) {
+      console.error('SynoHub initial render failed', error);
+      renderStaticMessage(
+        'SynoHub initial render failed',
+        error instanceof Error ? error.message : String(error)
+      );
+    }
   })
   .catch((error) => {
     console.error('SynoHub app module failed to load', error);
