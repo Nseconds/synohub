@@ -3,6 +3,36 @@ import { LayoutDashboard, Users, ClipboardList as TooltipIcon, MessageSquare, Pl
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "./lib/utils";
 import axios from "axios";
+import { LoginForm } from "./components/LoginForm";
+
+// --- Axios Interceptor for Signed Auth Tokens ---
+axios.interceptors.request.use((config) => {
+  const userStr = localStorage.getItem("synohub-user");
+  if (userStr) {
+    try {
+      const parsed = JSON.parse(userStr);
+      if (parsed.token) {
+        config.headers.Authorization = `Bearer ${parsed.token}`;
+      }
+    } catch (e) {
+      // Ignore
+    }
+  }
+  return config;
+}, (error) => {
+  return Promise.reject(error);
+});
+
+axios.interceptors.response.use((response) => response, (error) => {
+  if (error.response?.status === 401) {
+    try {
+      localStorage.removeItem("synohub-user");
+    } catch {
+      // Ignore unavailable storage.
+    }
+  }
+  return Promise.reject(error);
+});
 
 // --- Types ---
 interface Customer {
@@ -132,15 +162,23 @@ const StatCard = ({ label, value, icon: Icon, color, subValue }: { label: string
 
 
 
-const ChatInterface = ({ onRecordSaved, onNewStaffDetected }: { onRecordSaved?: (savedRecord?: any) => void, onNewStaffDetected?: (name: string) => void }) => {
+const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInputLoaded, userKey }: { onRecordSaved?: (savedRecord?: any) => void, onNewStaffDetected?: (name: string) => void, forcedInput?: string, onInputLoaded?: () => void, userKey?: string }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    setMessages([]);
     fetchHistory();
-  }, []);
+  }, [userKey]);
+
+  useEffect(() => {
+    if (forcedInput) {
+      setInput(forcedInput);
+      if (onInputLoaded) onInputLoaded();
+    }
+  }, [forcedInput, onInputLoaded]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -317,11 +355,69 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected }: { onRecordSaved?: 
   );
 };
 
+class AppBoundary extends React.Component<any, any> {
+  state = { hasError: false };
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error: any, errorInfo: any) {
+    console.error("SynoHub layout crash caught:", error, errorInfo);
+    try {
+      localStorage.removeItem("synohub-user");
+    } catch (e) {}
+  }
+  render() {
+    const { children, fallback } = (this as any).props;
+    if (this.state.hasError) {
+      return fallback;
+    }
+    return children;
+  }
+}
+
 export default function App() {
-  const [activeTab, setActiveTab ] = useState<string>("overview");
+  const [user, setUser] = useState<{ name: string; role: string; token: string } | null>(() => {
+    try {
+      const saved = localStorage.getItem("synohub-user");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (
+          parsed &&
+          typeof parsed === "object" &&
+          typeof parsed.name === "string" &&
+          typeof parsed.role === "string" &&
+          (parsed.role === "admin" || parsed.role === "staff" || parsed.role === "guest")
+        ) {
+          return parsed;
+        } else {
+          localStorage.removeItem("synohub-user");
+        }
+      }
+    } catch (e) {
+      try {
+        localStorage.removeItem("synohub-user");
+      } catch (err) {}
+    }
+    return null;
+  });
+
+  const [activeTab, setActiveTab ] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem("synohub-user");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && parsed.role && parsed.role !== "guest") {
+          return "overview";
+        }
+      }
+    } catch (e) {}
+    return "new-form";
+  });
+
   const [requestedPeopleList, setRequestedPeopleList] = useState<string[]>(REQUESTED_PEOPLE);
   const [defaultRequestedPerson, setDefaultRequestedPerson] = useState<string>("");
   const [pendingStaffName, setPendingStaffName] = useState<string | null>(null);
+  const [prefilledChatPrompt, setPrefilledChatPrompt] = useState("");
   const [data, setData] = useState<{ registrations: Registration[], services: ServiceTicket[], customers: Customer[] }>({ 
     registrations: [], services: [], customers: [] 
   });
@@ -423,6 +519,21 @@ export default function App() {
     setShowSuggestions(false);
   };
 
+  // Synchronize authenticated user credentials to form defaults
+  useEffect(() => {
+    if (user) {
+      if (user.role === "staff") {
+        setDefaultRequestedPerson(user.name);
+        setLeadForm(prev => ({ ...prev, requestedPerson: user.name }));
+        setTicketForm(prev => ({ ...prev, requestedPerson: user.name }));
+      } else {
+        setDefaultRequestedPerson("");
+        setLeadForm(prev => ({ ...prev, requestedPerson: "" }));
+        setTicketForm(prev => ({ ...prev, requestedPerson: "" }));
+      }
+    }
+  }, [user]);
+
   // Safe reset when tab is switched
   useEffect(() => {
     if (activeTab === "new-form") {
@@ -436,7 +547,7 @@ export default function App() {
 
   // Sync leadForm with selectedLeadId from DB registrations dynamically
   useEffect(() => {
-    if (selectedLeadId && data.registrations.length > 0) {
+    if (selectedLeadId && data?.registrations && data.registrations.length > 0) {
       const selectedReg = data.registrations.find(r => r.id === selectedLeadId);
       if (selectedReg) {
         setLeadForm({
@@ -503,7 +614,7 @@ export default function App() {
       }));
       showToast(`Populated "New Form" with details for: ${cust.name}`);
     } else if (activeTab === "existing-form") {
-      const matchingReg = data.registrations.find(r => r.customerName.toLowerCase() === cust.name.toLowerCase());
+      const matchingReg = (data?.registrations || []).find(r => r && r.customerName && cust?.name && (r.customerName || '').toLowerCase() === (cust.name || '').toLowerCase());
       if (matchingReg) {
         setSelectedLeadId(matchingReg.id);
         showToast(`Loaded existing Lead ID #${matchingReg.id} for: ${cust.name}`);
@@ -548,29 +659,37 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (!user) {
+      setLoading(false);
+      return;
+    }
     fetchData();
     const interval = setInterval(fetchData, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [user?.token]);
 
   const fetchData = async () => {
     try {
       const res = await axios.get("/api/data");
-      setData(res.data);
+      setData({
+        registrations: res.data && Array.isArray(res.data.registrations) ? res.data.registrations : [],
+        services: res.data && Array.isArray(res.data.services) ? res.data.services : [],
+        customers: res.data && Array.isArray(res.data.customers) ? res.data.customers : []
+      });
       setDbError(null);
 
       // Extract dynamic requestedPerson and append to listed people if missing
       const dbRequestedPeople = new Set<string>();
-      if (res.data.registrations && Array.isArray(res.data.registrations)) {
+      if (res.data?.registrations && Array.isArray(res.data.registrations)) {
         res.data.registrations.forEach((r: any) => {
-          if (r.requestedPerson && r.requestedPerson.trim()) {
+          if (r?.requestedPerson && r.requestedPerson.trim()) {
             dbRequestedPeople.add(r.requestedPerson.trim());
           }
         });
       }
-      if (res.data.services && Array.isArray(res.data.services)) {
+      if (res.data?.services && Array.isArray(res.data.services)) {
         res.data.services.forEach((s: any) => {
-          if (s.requestedPerson && s.requestedPerson.trim()) {
+          if (s?.requestedPerson && s.requestedPerson.trim()) {
             dbRequestedPeople.add(s.requestedPerson.trim());
           }
         });
@@ -582,7 +701,7 @@ export default function App() {
           dbRequestedPeople.forEach(person => {
             const trimmed = person.trim();
             const capitalized = trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
-            if (capitalized && !merged.some(p => p.toLowerCase() === capitalized.toLowerCase())) {
+            if (capitalized && !merged.some(p => (p || '').toLowerCase() === capitalized.toLowerCase())) {
               merged.push(capitalized);
             }
           });
@@ -610,23 +729,25 @@ export default function App() {
     }
   };
 
-  const filteredRegistrations = data.registrations.filter(reg => {
-    const matchesSearch = reg.customerName.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                         reg.contactName?.toLowerCase().includes(searchTerm.toLowerCase());
+  const filteredRegistrations = (data?.registrations || []).filter(reg => {
+    if (!reg) return false;
+    const matchesSearch = ((reg.customerName || '').toLowerCase()).includes((searchTerm || '').toLowerCase()) || 
+                          ((reg.contactName || '').toLowerCase()).includes((searchTerm || '').toLowerCase());
     const matchesRegion = filterRegion === "All" || reg.region === filterRegion;
     const matchesStatus = filterStatus === "All" || reg.status === filterStatus;
     return matchesSearch && matchesRegion && matchesStatus;
   });
 
-  const filteredServices = data.services.filter(svc => {
-    const matchesSearch = svc.customerName.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                         svc.ticketId.toLowerCase().includes(searchTerm.toLowerCase());
+  const filteredServices = (data?.services || []).filter(svc => {
+    if (!svc) return false;
+    const matchesSearch = ((svc.customerName || '').toLowerCase()).includes((searchTerm || '').toLowerCase()) || 
+                          ((svc.ticketId || '').toLowerCase()).includes((searchTerm || '').toLowerCase());
     const matchesStatus = filterStatus === "All" || svc.status === filterStatus;
     return matchesSearch && matchesStatus;
   });
 
-  const filteredCustomers = data.customers.filter(cust => 
-    cust.name.toLowerCase().includes(searchTerm.toLowerCase())
+  const filteredCustomers = (data?.customers || []).filter(cust => 
+    cust && cust.name && ((cust.name || '').toLowerCase()).includes((searchTerm || '').toLowerCase())
   );
 
 
@@ -635,10 +756,73 @@ export default function App() {
     { id: "new-form", label: "New Form", icon: Plus },
     { id: "existing-form", label: "Existing Form", icon: ClipboardList },
     { id: "ai", label: "SynoAI Chat", icon: Sparkles },
-  ];
+  ].filter(item => {
+    if (!user) return false;
+    if (user.role === "guest") {
+      // Guests are restricted to task submission and secure interaction flows
+      return item.id === "new-form" || item.id === "ai";
+    }
+    return true;
+  });
+
+  if (!user) {
+    return (
+      <LoginForm 
+        onLoginSuccess={(loggedUser) => {
+          localStorage.setItem("synohub-user", JSON.stringify(loggedUser));
+          setUser(loggedUser);
+          if (loggedUser.role === "guest") {
+            setActiveTab("new-form");
+          } else {
+            setActiveTab("overview");
+          }
+          showToast(`Welcome back, ${loggedUser.name}!`);
+          setTimeout(() => {
+            fetchData();
+          }, 100);
+        }} 
+        onProceedAsGuest={async () => {
+          const res = await axios.post("/api/guest-session");
+          const guestUser = { name: res.data.name, role: res.data.role, token: res.data.token };
+          localStorage.setItem("synohub-user", JSON.stringify(guestUser));
+          setUser(guestUser);
+          setActiveTab("new-form");
+          showToast("Accessing as Public Guest. Data retrieval is secured.");
+        }}
+      />
+    );
+  }
+
+  const handleLoginSuccessRecovery = (loggedUser: any) => {
+    try {
+      localStorage.setItem("synohub-user", JSON.stringify(loggedUser));
+    } catch (e) {}
+    setUser(loggedUser);
+    window.location.reload();
+  };
+
+  const handleProceedAsGuestRecovery = async () => {
+    try {
+      const res = await axios.post("/api/guest-session");
+      const guestUser = { name: res.data.name, role: res.data.role, token: res.data.token };
+      localStorage.setItem("synohub-user", JSON.stringify(guestUser));
+      setUser(guestUser);
+      window.location.reload();
+    } catch (e) {
+      console.error("Guest recovery failed", e);
+    }
+  };
+
+  const errorFallback = (
+    <LoginForm 
+      onLoginSuccess={handleLoginSuccessRecovery}
+      onProceedAsGuest={handleProceedAsGuestRecovery}
+    />
+  );
 
   return (
-    <div className="flex h-screen bg-[#F8FAFC] text-zinc-700 font-sans selection:bg-[#00ADC6]/20 relative">
+    <AppBoundary fallback={errorFallback}>
+      <div className="flex h-screen bg-[#F8FAFC] text-zinc-700 font-sans selection:bg-[#00ADC6]/20 relative">
       {/* Toast Notification Container */}
       <AnimatePresence>
         {notification && (
@@ -697,6 +881,38 @@ export default function App() {
             </button>
           ))}
         </nav>
+
+        {user && (
+          <div className="px-6 pb-2">
+            <div className="bg-zinc-50 rounded-xl p-3 border border-zinc-100 flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <div className="flex flex-col">
+                  <span className="text-[11px] font-bold text-zinc-900 truncate max-w-[125px]" title={user.name}>
+                    {user.name}
+                  </span>
+                  <span className={cn(
+                    "text-[9px] font-mono tracking-wider uppercase px-1.5 py-0.5 rounded w-max mt-0.5",
+                    user.role === "admin" ? "bg-rose-50 border border-rose-100 text-rose-600" :
+                    user.role === "staff" ? "bg-teal-50 border border-teal-100 text-teal-600" : "bg-zinc-100 border border-zinc-200 text-zinc-600"
+                  )}>
+                    {user.role}
+                  </span>
+                </div>
+                <button
+                  onClick={() => {
+                    localStorage.removeItem("synohub-user");
+                    setUser(null);
+                    showToast("Signed out successfully");
+                  }}
+                  className="text-[10px] text-zinc-400 hover:text-rose-500 font-bold uppercase tracking-wider pl-2 transition-colors cursor-pointer"
+                  title="Sign Out"
+                >
+                  Exit
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="p-6">
            <div className="bg-zinc-50 rounded-xl p-4 border border-zinc-100">
@@ -976,6 +1192,7 @@ export default function App() {
                                 <th className="px-4 py-2 bg-zinc-50">Customer Name</th>
                                 <th className="px-4 py-2 bg-zinc-50">Implementation Type</th>
                                 <th className="px-4 py-2 bg-zinc-50">Sales Person</th>
+                                <th className="px-4 py-2 bg-zinc-50">Requested Person</th>
                                 <th className="px-4 py-2 bg-zinc-50">Contact Name</th>
                                 <th className="px-4 py-2 bg-zinc-50">Phone</th>
                                 <th className="px-4 py-2 bg-zinc-50">Locator Username</th>
@@ -986,8 +1203,9 @@ export default function App() {
                             </thead>
                             <tbody className="divide-y divide-zinc-100 text-zinc-650">
                               {filteredCustomers.map(cust => {
-                                const latestRequest = [...data.registrations].reverse().find(r => r.customerName.toLowerCase() === cust.name.toLowerCase());
-                                const salesRep = latestRequest?.salesPerson || latestRequest?.requestedPerson || "Shams";
+                                const latestRequest = [...(data?.registrations || [])].reverse().find(r => r && r.customerName && cust && cust.name && (r.customerName || '').toLowerCase() === (cust.name || '').toLowerCase());
+                                const salesPersonVal = latestRequest?.salesPerson || "Unassigned";
+                                const requestedPersonVal = latestRequest?.requestedPerson || "Unassigned";
                                 const locatorUsername = cust.name ? cust.name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12) : "temco";
                                 const locatorStatus = "active";
 
@@ -997,7 +1215,8 @@ export default function App() {
                                     <td className="px-4 py-2 font-medium">
                                       <span className="bg-zinc-100 text-zinc-700 px-1.5 py-0.5 rounded text-[10px] font-semibold">{cust.implementationType || "LOCATOR"}</span>
                                     </td>
-                                    <td className="px-4 py-2 font-medium text-zinc-600">{salesRep}</td>
+                                    <td className="px-4 py-2 font-medium text-zinc-600">{salesPersonVal}</td>
+                                    <td className="px-4 py-2 font-medium text-zinc-600">{requestedPersonVal}</td>
                                     <td className="px-4 py-2">{cust.contactName || "—"}</td>
                                     <td className="px-4 py-2 whitespace-nowrap">{cust.phone || "—"}</td>
                                     <td className="px-4 py-2 font-mono text-zinc-600 font-medium">{locatorUsername}</td>
@@ -1143,7 +1362,7 @@ export default function App() {
                           />
                           {showSuggestions && leadForm.customerName && (
                             (() => {
-                              const list = data.customers.filter(c => c.name.toLowerCase().includes(leadForm.customerName!.toLowerCase()));
+                              const list = (data?.customers || []).filter(c => c && c.name && (c.name || '').toLowerCase().includes((leadForm.customerName || '').toLowerCase()));
                               if (list.length === 0) return null;
                               return (
                                 <div className="absolute left-0 right-0 z-50 bg-white border border-[#E2E8F0] rounded shadow-lg max-h-48 overflow-y-auto mt-1 divide-y divide-zinc-100">
@@ -1662,11 +1881,19 @@ export default function App() {
                                                <span className="text-zinc-400 font-semibold">• Contract: {reg.projectValue ? formatCurrency(parseFloat(reg.projectValue)) : "—"}</span>
                                              </div>
                                           </div>
-                                          <div className="text-right shrink-0">
-                                             <div className="text-[10px] font-bold text-zinc-900">Registered By</div>
-                                             <p className="text-[9px] text-zinc-400 font-semibold mt-1 uppercase tracking-wider">
-                                               {reg.salesPerson || reg.requestedPerson || "Staff"}
-                                             </p>
+                                          <div className="text-right shrink-0 flex flex-col gap-1.5 justify-center min-w-[100px]">
+                                             <div>
+                                               <div className="text-[10px] font-bold text-zinc-900 leading-tight">Sales Person</div>
+                                               <p className="text-[9px] text-zinc-400 font-semibold uppercase tracking-wider">
+                                                 {reg.salesPerson || "Unassigned"}
+                                               </p>
+                                             </div>
+                                             <div>
+                                               <div className="text-[10px] font-bold text-zinc-900 leading-tight">Requested Person</div>
+                                               <p className="text-[9px] text-zinc-400 font-semibold uppercase tracking-wider">
+                                                 {reg.requestedPerson || "Unassigned"}
+                                               </p>
+                                             </div>
                                           </div>
                                        </div>
                                      ))}
@@ -1808,6 +2035,7 @@ export default function App() {
                                 <th className="px-4 py-2 bg-zinc-50">Customer Name</th>
                                 <th className="px-4 py-2 bg-zinc-50">Implementation Type</th>
                                 <th className="px-4 py-2 bg-zinc-50">Sales Person</th>
+                                <th className="px-4 py-2 bg-zinc-50">Requested Person</th>
                                 <th className="px-4 py-2 bg-zinc-50">Contact Name</th>
                                 <th className="px-4 py-2 bg-zinc-50">Phone</th>
                                 <th className="px-4 py-2 bg-zinc-50">Locator Username</th>
@@ -1818,8 +2046,9 @@ export default function App() {
                             </thead>
                             <tbody className="divide-y divide-zinc-100 text-zinc-650">
                               {filteredCustomers.map(cust => {
-                                const latestRequest = [...data.registrations].reverse().find(r => r.customerName.toLowerCase() === cust.name.toLowerCase());
-                                const salesRep = latestRequest?.salesPerson || latestRequest?.requestedPerson || "Shams";
+                                const latestRequest = [...(data?.registrations || [])].reverse().find(r => r && r.customerName && cust && cust.name && (r.customerName || '').toLowerCase() === (cust.name || '').toLowerCase());
+                                const salesPersonVal = latestRequest?.salesPerson || "Unassigned";
+                                const requestedPersonVal = latestRequest?.requestedPerson || "Unassigned";
                                 const locatorUsername = cust.name ? cust.name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12) : "temco";
                                 const locatorStatus = "active";
 
@@ -1829,7 +2058,8 @@ export default function App() {
                                     <td className="px-4 py-2 font-medium">
                                       <span className="bg-zinc-100 text-zinc-700 px-1.5 py-0.5 rounded text-[10px] font-semibold">{cust.implementationType || "LOCATOR"}</span>
                                     </td>
-                                    <td className="px-4 py-2 font-medium text-zinc-600">{salesRep}</td>
+                                    <td className="px-4 py-2 font-medium text-zinc-650">{salesPersonVal}</td>
+                                    <td className="px-4 py-2 font-medium text-zinc-650">{requestedPersonVal}</td>
                                     <td className="px-4 py-2">{cust.contactName || "—"}</td>
                                     <td className="px-4 py-2 whitespace-nowrap">{cust.phone || "—"}</td>
                                     <td className="px-4 py-2 font-mono text-zinc-600 font-medium">{locatorUsername}</td>
@@ -1865,13 +2095,23 @@ export default function App() {
                   {/* Operational Target Status Banner */}
                   <div className="mb-4">
                     {selectedLeadId ? (
-                      <div className="bg-amber-50 border border-amber-200/50 rounded-xl p-3 flex items-center justify-between text-[11px] text-amber-800">
-                        <div className="flex items-center gap-2">
-                          <span className="flex h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
-                          <span>✏️ <strong>Editing Mode:</strong> You are editing lead <strong>ID #{selectedLeadId} ({leadForm.customerName})</strong>. Submitting will execute a direct database <code>PUT</code> update.</span>
+                      user?.role === "staff" ? (
+                        <div className="bg-rose-50 border border-rose-200/50 rounded-xl p-3 flex items-center justify-between text-[11px] text-rose-800">
+                          <div className="flex items-center gap-2">
+                            <span className="flex h-2 w-2 rounded-full bg-rose-500 animate-pulse" />
+                            <span>🔒 <strong>Read-Only Mode:</strong> Staff Coordinators can view their assigned lead <strong>ID #{selectedLeadId} ({leadForm.customerName})</strong>, but edited submissions are restricted.</span>
+                          </div>
+                          <button type="button" onClick={resetLeadForm} className="font-bold underline uppercase tracking-tighter text-[9px] hover:text-rose-900">Switch to Create New</button>
                         </div>
-                        <button type="button" onClick={resetLeadForm} className="font-bold underline uppercase tracking-tighter text-[9px] hover:text-amber-900">Switch to Create New</button>
-                      </div>
+                      ) : (
+                        <div className="bg-amber-50 border border-amber-200/50 rounded-xl p-3 flex items-center justify-between text-[11px] text-amber-800">
+                          <div className="flex items-center gap-2">
+                            <span className="flex h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
+                            <span>✏️ <strong>Editing Mode:</strong> You are editing lead <strong>ID #{selectedLeadId} ({leadForm.customerName})</strong>. Submitting will execute a direct database <code>PUT</code> update.</span>
+                          </div>
+                          <button type="button" onClick={resetLeadForm} className="font-bold underline uppercase tracking-tighter text-[9px] hover:text-amber-900">Switch to Create New</button>
+                        </div>
+                      )
                     ) : leadForm.customerName ? (
                       <div className="bg-teal-50 border border-teal-200/50 rounded-xl p-3 text-[11px] text-teal-800 flex items-center gap-2">
                         <span className="flex h-2 w-2 rounded-full bg-[#00ADC6]" />
@@ -1881,6 +2121,7 @@ export default function App() {
                   </div>
 
                   <form onSubmit={handleLeadSubmit} className="space-y-4">
+                    <fieldset disabled={user?.role === "staff" && !!selectedLeadId} className="space-y-4 w-full border-none p-0 m-0">
                     {/* Row 1: Source, Region, Status, Imp Type, Price, Proj Value */}
                     <div className="grid grid-cols-6 gap-4">
                       <div className="space-y-1">
@@ -1940,7 +2181,7 @@ export default function App() {
                         />
                         {showExistingSuggestions && leadForm.customerName && (
                           (() => {
-                            const list = data.customers.filter(c => c.name.toLowerCase().includes(leadForm.customerName!.toLowerCase()));
+                            const list = (data?.customers || []).filter(c => c && c.name && (c.name || '').toLowerCase().includes((leadForm.customerName || '').toLowerCase()));
                             if (list.length === 0) return null;
                             return (
                               <div className="absolute left-0 right-0 z-50 bg-white border border-[#E2E8F0] rounded shadow-lg max-h-48 overflow-y-auto mt-1 divide-y divide-zinc-100">
@@ -2085,6 +2326,7 @@ export default function App() {
                         <Plus size={20} />
                       </button>
                     </div>
+                    </fieldset>
 
                     <div className="flex justify-end gap-3 pt-4">
                       <button 
@@ -2094,8 +2336,12 @@ export default function App() {
                       >
                         <X size={12} /> Clear Form
                       </button>
-                      <button type="submit" className="bg-teal-accent text-white px-10 py-2 rounded font-bold text-[10px] uppercase tracking-widest shadow-lg shadow-teal-accent/10 hover:opacity-95 transition-all">
-                        SAVE
+                      <button 
+                        type="submit" 
+                        disabled={user?.role === "staff" && !!selectedLeadId}
+                        className="bg-teal-accent disabled:bg-zinc-300 disabled:text-zinc-500 disabled:cursor-not-allowed text-white px-10 py-2 rounded font-bold text-[10px] uppercase tracking-widest shadow-lg shadow-teal-accent/10 hover:opacity-95 disabled:shadow-none transition-all cursor-pointer"
+                      >
+                        {user?.role === "staff" && !!selectedLeadId ? "READ ONLY" : "SAVE"}
                       </button>
                     </div>
                   </form>
@@ -2116,6 +2362,9 @@ export default function App() {
                   <p className="text-sm text-zinc-500 mt-2">Manage your entire fleet via cognitive automation.</p>
                 </div>
                 <ChatInterface 
+                  userKey={user ? `${user.role}:${user.name}` : "guest:guest"}
+                  forcedInput={prefilledChatPrompt}
+                  onInputLoaded={() => setPrefilledChatPrompt("")}
                   onNewStaffDetected={(name) => {
                     if (!requestedPeopleList.some(p => p.toLowerCase() === name.toLowerCase())) {
                       setPendingStaffName(name);
@@ -2195,6 +2444,7 @@ export default function App() {
             
             <form onSubmit={async (e) => {
               e.preventDefault();
+              if (user?.role === "staff") return;
               try {
                 if (editingItem.type === 'lead') {
                   await axios.put(`/api/leads/${editingItem.data.id}`, editingItem.data);
@@ -2209,6 +2459,7 @@ export default function App() {
                 alert("Failed to update: " + err.message);
               }
             }} className="p-6 overflow-y-auto space-y-4 text-xs">
+              <fieldset disabled={user?.role === "staff"} className="space-y-4 w-full border-none p-0 m-0">
               
               {editingItem.type === 'lead' && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2332,10 +2583,17 @@ export default function App() {
                   </div>
                 </div>
               )}
+              </fieldset>
 
               <div className="flex justify-end gap-3 pt-4 border-t border-zinc-100">
                 <button type="button" onClick={() => setEditingItem(null)} className="px-4 py-2 border border-zinc-200 rounded-lg text-zinc-500 font-bold text-[10px] uppercase hover:bg-zinc-50">Cancel</button>
-                <button type="submit" className="px-6 py-2 bg-teal-accent text-white rounded-lg font-bold text-[10px] uppercase hover:opacity-95 shadow-md shadow-teal-accent/10">Save Changes</button>
+                <button 
+                  type="submit" 
+                  disabled={user?.role === "staff"}
+                  className="px-6 py-2 bg-teal-accent disabled:bg-zinc-300 disabled:text-zinc-500 disabled:cursor-not-allowed disabled:shadow-none text-white rounded-lg font-bold text-[10px] uppercase hover:opacity-95 shadow-md shadow-teal-accent/10 whitespace-nowrap cursor-pointer"
+                >
+                  {user?.role === "staff" ? "Read Only" : "Save Changes"}
+                </button>
               </div>
             </form>
           </motion.div>
@@ -2407,7 +2665,8 @@ export default function App() {
           </motion.div>
         </div>
       )}
+
     </div>
+  </AppBoundary>
   );
 }
-

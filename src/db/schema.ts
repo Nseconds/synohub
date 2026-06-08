@@ -9,6 +9,7 @@ export const customers = mysqlTable('customers', {
   region: varchar('region', { length: 100 }),
   implementationType: varchar('implementation_type', { length: 100 }),
   vehicleCount: int('vehicle_count').default(0),
+  createdBy: varchar('created_by', { length: 150 }).default('guest'),
 });
 
 export const serviceRequests = mysqlTable('service_requests', {
@@ -47,7 +48,8 @@ export const serviceRequests = mysqlTable('service_requests', {
   amount: varchar('amount', { length: 50 }),
   vehicleDetails: text('vehicle_details'),
   notes: text('notes'),
-  jobStatus: varchar('job_status', { length: 50 }).default('Pending')
+  jobStatus: varchar('job_status', { length: 50 }).default('Pending'),
+  createdBy: varchar('created_by', { length: 150 }).default('guest'),
 });
 
 export const messages = mysqlTable('messages', {
@@ -55,4 +57,5 @@ export const messages = mysqlTable('messages', {
   role: varchar('role', { length: 20 }).notNull(), // 'user' or 'assistant'
   content: text('content').notNull(),
   timestamp: timestamp('timestamp').defaultNow(),
+  username: varchar('username', { length: 255 }),
 });

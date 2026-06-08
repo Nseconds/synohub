@@ -1,16 +1,26 @@
 import "dotenv/config";
-import express from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { db, pool } from "./src/db";
 import { customers, serviceRequests, messages } from "./src/db/schema";
-import { eq, like, or, desc } from "drizzle-orm";
+import { eq, like, or, desc, and } from "drizzle-orm";
 import axios from "axios";
 import crypto from "crypto";
 import mysql from "mysql2/promise";
 import fs from "fs";
 
 import { GoogleGenAI } from "@google/genai";
+
+type UserRole = "admin" | "staff" | "guest";
+
+interface AuthUser {
+  sub: string;
+  name: string;
+  role: UserRole;
+  iat: number;
+  exp: number;
+}
 
 // Helper to safely strip surrounding quotation marks from environment variables
 function cleanEnvVar(val: string | undefined): string | null {
@@ -60,6 +70,104 @@ try {
   }
 } catch (err) {
   console.error("Failed to load prompts.json, using defaults.");
+}
+
+const staffRoster = [
+  "Ajmal", "Amrutha", "Athul", "Celine", "Deepak", "Faizal", "Ivy", "Midhun",
+  "Mohamed Musthafa", "Naseeb", "Nishad", "Rasick", "Reyn", "Shamnad", "Shams", "Shyamjith"
+];
+
+const allowedStaff = staffRoster.map(name => name.toLowerCase());
+const authSecret = cleanEnvVar(process.env.AUTH_SECRET || process.env.JWT_SECRET) || crypto.randomBytes(32).toString("hex");
+const configuredAdminPassword = cleanEnvVar(process.env.ADMIN_PASSWORD);
+const configuredStaffPassword = cleanEnvVar(process.env.STAFF_PASSWORD);
+const devAdminPassword = configuredAdminPassword ? null : crypto.randomBytes(9).toString("base64url");
+
+if (!process.env.AUTH_SECRET && !process.env.JWT_SECRET) {
+  console.warn("AUTH_SECRET is not set. Tokens will be invalidated on every server restart.");
+}
+
+if (!configuredAdminPassword && process.env.NODE_ENV !== "production") {
+  console.warn(`ADMIN_PASSWORD is not set. Temporary development admin password: ${devAdminPassword}`);
+}
+
+if (!configuredStaffPassword) {
+  console.warn("STAFF_PASSWORD is not set. Staff password login is disabled until it is configured.");
+}
+
+function base64Url(input: string | Buffer): string {
+  return Buffer.from(input).toString("base64url");
+}
+
+function signPayload(payload: string): string {
+  return crypto.createHmac("sha256", authSecret).update(payload).digest("base64url");
+}
+
+function issueToken(user: Pick<AuthUser, "sub" | "name" | "role">): string {
+  const now = Math.floor(Date.now() / 1000);
+  const payload: AuthUser = {
+    ...user,
+    iat: now,
+    exp: now + 60 * 60 * 12,
+  };
+  const encodedPayload = base64Url(JSON.stringify(payload));
+  return `${encodedPayload}.${signPayload(encodedPayload)}`;
+}
+
+function verifyToken(token: string | undefined): AuthUser | null {
+  if (!token || !token.includes(".")) return null;
+  const [encodedPayload, signature] = token.split(".");
+  if (!encodedPayload || !signature) return null;
+
+  const expectedSignature = signPayload(encodedPayload);
+  const signatureBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expectedSignature);
+  if (signatureBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as AuthUser;
+    if (!parsed.name || !parsed.role || !parsed.sub || !parsed.exp) return null;
+    if (!["admin", "staff", "guest"].includes(parsed.role)) return null;
+    if (parsed.exp < Math.floor(Date.now() / 1000)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function getBearerToken(req: Request): string | undefined {
+  const header = req.headers.authorization || "";
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  return match?.[1];
+}
+
+function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const user = verifyToken(getBearerToken(req));
+  if (!user) {
+    return res.status(401).json({ error: "Unauthorized. Please sign in again." });
+  }
+  (req as any).user = user;
+  return next();
+}
+
+function requireRoles(...roles: UserRole[]) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const user = (req as any).user as AuthUser | undefined;
+    if (!user || !roles.includes(user.role)) {
+      return res.status(403).json({ error: "Forbidden. Your account does not have access to this action." });
+    }
+    return next();
+  };
+}
+
+function getAuthUser(req: Request): AuthUser {
+  return (req as any).user as AuthUser;
+}
+
+function normalizeUserName(name: string): string {
+  return name.trim().toLowerCase();
 }
 
 async function initDB() {
@@ -160,6 +268,27 @@ async function initDB() {
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    try {
+      await pool.execute(`ALTER TABLE messages ADD COLUMN username VARCHAR(255) DEFAULT 'guest'`);
+      console.log("Database table 'messages' verified with 'username' column.");
+    } catch (columnErr) {
+      // Column already exists, which is normal on subsequent boots
+    }
+
+    try {
+      await pool.execute(`ALTER TABLE service_requests ADD COLUMN created_by VARCHAR(255) DEFAULT 'guest'`);
+      console.log("Database table 'service_requests' verified with 'created_by' column.");
+    } catch (err) {
+      // Column already exists
+    }
+
+    try {
+      await pool.execute(`ALTER TABLE customers ADD COLUMN created_by VARCHAR(255) DEFAULT 'guest'`);
+      console.log("Database table 'customers' verified with 'created_by' column.");
+    } catch (err) {
+      // Column already exists
+    }
     
     console.log("Database initialized.");
   } catch (e) {
@@ -228,11 +357,23 @@ function mapInputToSchema(input: any): any {
   return schema;
 }
 
-async function handleAIRecordSave(reply: string): Promise<{ reply: string; savedRecord?: any }> {
+async function handleAIRecordSave(reply: string, userRole: string = "guest", userName: string = ""): Promise<{ reply: string; savedRecord?: any }> {
   // 1. Process [[DELETE_RECORD:...]]
   const deleteMatch = reply.match(/\[{1,2}DELETE_RECORD:(.*?)\]{1,2}/s);
   if (deleteMatch) {
     try {
+      if (userRole !== "admin") {
+        console.warn(`[Security Alert] Non-admin user "${userName}" tried to delete a record via AI.`);
+        if (userRole === "staff") {
+          return {
+            reply: `Access Denied: Staff users can create and view records but cannot modify or delete existing records. Please contact a Manager or Administrator.`
+          };
+        }
+        return {
+          reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(Authorization Warning: Access Denied. Only system administrators can delete records.)`
+        };
+      }
+
       let rawJson = deleteMatch[1].trim();
       const firstBrace = rawJson.indexOf("{");
       const lastBrace = rawJson.lastIndexOf("}");
@@ -245,17 +386,17 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
       if (record.type === "registration") {
         await db.delete(serviceRequests).where(eq(serviceRequests.id, id));
         return {
-          reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(CRM: Registration record #${id} deleted successfully.)`
+          reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(CRM: Registration record #${id} deleted successfully by Admin.)`
         };
       } else if (record.type === "service") {
         await db.delete(serviceRequests).where(eq(serviceRequests.id, id));
         return {
-          reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(CRM: Service ticket record #${id} deleted successfully.)`
+          reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(CRM: Service ticket record #${id} deleted successfully by Admin.)`
         };
       } else if (record.type === "customer") {
         await db.delete(customers).where(eq(customers.id, id));
         return {
-          reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(CRM: Customer account record #${id} deleted successfully.)`
+          reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(CRM: Customer account record #${id} deleted successfully by Admin.)`
         };
       }
     } catch (e) {
@@ -267,6 +408,12 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
   const updateMatch = reply.match(/\[{1,2}UPDATE_RECORD:(.*?)\]{1,2}/s);
   if (updateMatch) {
     try {
+      if (userRole === "guest") {
+        return {
+          reply: reply.replace(updateMatch[0], "").trim() + `\n\n(Authorization Warning: Access Denied. Public guest users cannot update records.)`
+        };
+      }
+
       let rawJson = updateMatch[1].trim();
       const firstBrace = rawJson.indexOf("{");
       const lastBrace = rawJson.lastIndexOf("}");
@@ -277,6 +424,14 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
       const id = parseInt(record.id);
       console.log(`[AI Auto-Update] Detected record update: ${record.type}, ID: ${id}`);
       
+      // Staff authorization validation: Staff coordinators cannot edit previous/existing records
+      if (userRole === "staff") {
+        console.warn(`[Security Guard] Staff member "${userName}" attempted to edit record #${id} via SynoAI.`);
+        return {
+          reply: `Access Denied: Staff users can create and view records but cannot modify or delete existing records. Please contact a Manager or Administrator.`
+        };
+      }
+
       if (record.type === "registration") {
         const mappedData = mapInputToSchema(record.data);
         await db.update(serviceRequests).set(mappedData).where(eq(serviceRequests.id, id));
@@ -290,6 +445,11 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
           reply: reply.replace(updateMatch[0], "").trim() + `\n\n(CRM: Service ticket #${id} updated successfully.)`
         };
       } else if (record.type === "customer") {
+        if (userRole !== "admin") {
+          return {
+            reply: reply.replace(updateMatch[0], "").trim() + `\n\n(Authorization Warning: Access Denied. Only system administrators can edit customer accounts.)`
+          };
+        }
         const mappedCustomer: any = {};
         if (record.data.name || record.data.customer_name) mappedCustomer.name = record.data.name || record.data.customer_name;
         if (record.data.contactName || record.data.contact_name) mappedCustomer.contactName = record.data.contactName || record.data.contact_name;
@@ -321,10 +481,15 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
       rawJson = rawJson.substring(firstBrace, lastBrace + 1);
     }
     const record = JSON.parse(rawJson);
-    console.log(`[AI Auto-Save] Detected record save: ${record.type}`);
+    console.log(`[AI Auto-Save] Detected record save: ${record.type} by role=${userRole}`);
     
     if (record.type === "registration") {
       const mapped = mapInputToSchema(record);
+      // Ensure the staff member's ticket is assigned to them automatically
+      if (userRole === "staff" && userName) {
+        mapped.requestedPerson = userName;
+      }
+      
       const [res]: any = await db.insert(serviceRequests).values({
         customerName: mapped.customerName || "Unknown",
         contactName: mapped.contactName || "",
@@ -348,7 +513,8 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
         migrateQty: mapped.migrateQty || 0,
         tradingQty: mapped.tradingQty || 0,
         serviceQty: mapped.serviceQty || 0,
-        otherQty: mapped.otherQty || 0
+        otherQty: mapped.otherQty || 0,
+        createdBy: userName || 'guest'
       });
 
       // Synchronize registration customer to customers table
@@ -365,7 +531,8 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
               email: mapped.email || "",
               region: mapped.region || "",
               implementationType: mapped.implementationType || "",
-              vehicleCount: totalQty
+              vehicleCount: totalQty,
+              createdBy: userName || 'guest'
             });
             console.log(`[AI Auto-Save] Synchronized customer ${customerName} into customers table.`);
           } else {
@@ -387,6 +554,10 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
     } else if (record.type === "service") {
       const ticketId = record.ticketId || ('TKT-' + crypto.randomBytes(4).toString('hex').toUpperCase());
       const mapped = mapInputToSchema(record);
+      if (userRole === "staff" && userName) {
+        mapped.requestedPerson = userName;
+      }
+      
       const [res]: any = await db.insert(serviceRequests).values({
         customerName: mapped.customerName || "Unknown",
         issueDescription: mapped.issueDescription || "",
@@ -395,7 +566,8 @@ async function handleAIRecordSave(reply: string): Promise<{ reply: string; saved
         requestedPerson: mapped.requestedPerson || "",
         paymentStatus: mapped.paymentStatus || "",
         amount: mapped.amount || "",
-        salesPerson: mapped.salesPerson || ""
+        salesPerson: mapped.salesPerson || "",
+        createdBy: userName || 'guest'
       });
       return {
         reply: reply.replace(saveMatch[0], "").trim() + `\n\n(CRM: Service ticket ${ticketId} created successfully.)`,
@@ -430,11 +602,98 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  // Login handler
+  app.post("/api/login", (req, res) => {
+    const { username, password } = req.body;
+    if (!username) {
+      return res.status(400).json({ error: "Username is required" });
+    }
+
+    const normalizedUser = username.trim().toLowerCase();
+    
+    // System Admin login check
+    const activeAdminPassword = configuredAdminPassword || (process.env.NODE_ENV !== "production" ? devAdminPassword : null);
+    if (normalizedUser === "admin" && activeAdminPassword && password === activeAdminPassword) {
+      const authUser = { sub: "admin", role: "admin" as const, name: "Administrator" };
+      return res.json({
+        success: true,
+        token: issueToken(authUser),
+        role: authUser.role,
+        name: authUser.name
+      });
+    }
+
+    if (allowedStaff.includes(normalizedUser)) {
+      if (!configuredStaffPassword) {
+        return res.status(503).json({ error: "Staff login is not configured. Set STAFF_PASSWORD on the server." });
+      }
+      if (password === configuredStaffPassword) {
+        const properName = staffRoster.find(p => p.toLowerCase() === normalizedUser) || username;
+        const authUser = { sub: `staff:${normalizedUser}`, role: "staff" as const, name: properName };
+        return res.json({
+          success: true,
+          token: issueToken(authUser),
+          role: authUser.role,
+          name: authUser.name
+        });
+      }
+    }
+
+    return res.status(401).json({ error: "Incorrect username or password. Check credentials roster." });
+  });
+
+  app.post("/api/guest-session", (_req, res) => {
+    const guestId = crypto.randomBytes(8).toString("hex");
+    const authUser = {
+      sub: `guest:${guestId}`,
+      role: "guest" as const,
+      name: `Guest-${guestId}`,
+    };
+    res.json({
+      success: true,
+      token: issueToken(authUser),
+      role: authUser.role,
+      name: authUser.name
+    });
+  });
+
   // Get all dashboard data
-  app.get("/api/data", async (req, res) => {
+  app.get("/api/data", requireAuth, async (req, res) => {
     try {
+      const authUser = getAuthUser(req);
+      const userRole = authUser.role;
+      const userName = normalizeUserName(authUser.name);
+
       const allCustomers = await db.select().from(customers);
-      const allRequests = await db.select().from(serviceRequests);
+      let allRequests = await db.select().from(serviceRequests);
+
+      // Filtering based on Security Role and userName
+      let filteredCustomers = allCustomers;
+      if (userRole === "guest") {
+        allRequests = allRequests.filter(r => {
+          const createdByVal = (r.createdBy || "").trim().toLowerCase();
+          return createdByVal === userName;
+        });
+        filteredCustomers = allCustomers.filter(c => {
+          const createdByVal = (c.createdBy || "").trim().toLowerCase();
+          return createdByVal === userName;
+        });
+      } else if (userRole === "staff" && userName) {
+        allRequests = allRequests.filter(r => {
+          const reqPerson = (r.requestedPerson || "").trim().toLowerCase();
+          const salesPerson = (r.salesPerson || "").trim().toLowerCase();
+          const createdByVal = (r.createdBy || "").trim().toLowerCase();
+          return reqPerson === userName || salesPerson === userName || createdByVal === userName;
+        });
+        
+        // Filter customer records to only the ones they are dealing with
+        const myCustomerNames = new Set(allRequests.map(r => (r.customerName || "").trim().toLowerCase()));
+        filteredCustomers = allCustomers.filter(c => {
+          const cName = (c.name || "").trim().toLowerCase();
+          const cCreatedBy = (c.createdBy || "").trim().toLowerCase();
+          return myCustomerNames.has(cName) || cCreatedBy === userName;
+        });
+      }
 
       // Map requests for lead registrations tab
       const allRegistrations = allRequests.map(r => ({
@@ -484,7 +743,7 @@ async function startServer() {
         location: s.location || s.region || ""
       }));
 
-      res.json({ registrations: allRegistrations, services: allServices, customers: allCustomers });
+      res.json({ registrations: allRegistrations, services: allServices, customers: filteredCustomers });
     } catch (error) {
       console.error("Dashboard data fetch failed:", error);
       res.status(500).json({ 
@@ -503,9 +762,18 @@ async function startServer() {
   });
 
   // Create new registration
-  app.post("/api/leads/new", async (req, res) => {
+  app.post("/api/leads/new", requireAuth, async (req, res) => {
     try {
       const body = req.body;
+      const authUser = getAuthUser(req);
+      const userRole = authUser.role;
+      const userName = authUser.name.trim();
+
+      let reqPerson = body.requestedPerson || body.requested_person || "";
+      if (userRole === "staff" && userName) {
+        reqPerson = userName;
+      }
+
       const [result] = await db.insert(serviceRequests).values({
         customerName: body.customerName || body.customer_name || "",
         contactName: body.contactName || body.contact_name || "",
@@ -520,7 +788,7 @@ async function startServer() {
         implementationType: body.implementationType || body.implementation_type || "",
         salesPerson: body.salesPerson || body.sales_person || "",
         salesType: body.salesType || body.sales_type || "",
-        requestedPerson: body.requestedPerson || body.requested_person || "",
+        requestedPerson: reqPerson,
         comment: body.comment || "",
         projectValue: body.projectValue || body.project_value || "",
         priceDetails: body.priceDetails || body.price_details || "",
@@ -531,7 +799,8 @@ async function startServer() {
         serviceQty: parseInt(body.serviceQty || body.service_qty || 0),
         otherQty: parseInt(body.otherQty || body.other_qty || 0),
         jobStatus: 'Pending',
-        createdAt: new Date().toISOString().substring(0, 10)
+        createdAt: new Date().toISOString().substring(0, 10),
+        createdBy: userName || 'guest'
       });
 
       // Synchronize lead customer to customers table
@@ -553,7 +822,8 @@ async function startServer() {
               email: body.email || "",
               region: body.region || "",
               implementationType: body.implementationType || body.implementation_type || "",
-              vehicleCount: totalQty > 0 ? totalQty : 1
+              vehicleCount: totalQty > 0 ? totalQty : 1,
+              createdBy: userName || 'guest'
             });
             console.log(`[API Leads/New] Synchronized customer ${customerName} into customers table.`);
           } else {
@@ -575,22 +845,32 @@ async function startServer() {
   });
 
   // Create service request
-  app.post("/api/services", async (req, res) => {
+  app.post("/api/services", requireAuth, async (req, res) => {
     try {
       const body = req.body;
+      const authUser = getAuthUser(req);
+      const userRole = authUser.role;
+      const userName = authUser.name.trim();
+
+      let reqPerson = body.requestedPerson || body.requested_person || "";
+      if (userRole === "staff" && userName) {
+        reqPerson = userName;
+      }
+
       const [result] = await db.insert(serviceRequests).values({
         customerName: body.customerName || body.customer_name || "",
         issueDescription: body.description || "",
         jobStatus: body.status || 'Pending',
         newQty: parseInt(body.quantity || 1),
-        requestedPerson: body.requestedPerson || body.requested_person || "",
+        requestedPerson: reqPerson,
         paymentStatus: body.payment || body.paymentStatus || "",
         amount: body.amount || "",
         salesPerson: body.assignee || "",
         location: body.location || body.region || "",
         region: body.location || body.region || "",
         status: 'New Lead',
-        createdAt: new Date().toISOString().substring(0, 10)
+        createdAt: new Date().toISOString().substring(0, 10),
+        createdBy: userName || 'guest'
       });
       res.json({ success: true, id: result.insertId, ticket_id: result.insertId ? ("TKT-" + result.insertId) : "", message: 'Service ticket created' });
     } catch (error) {
@@ -599,9 +879,21 @@ async function startServer() {
   });
 
   // Edit/Update lead registration
-  app.put("/api/leads/:id", async (req, res) => {
+  app.put("/api/leads/:id", requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
+      const authUser = getAuthUser(req);
+      const userRole = authUser.role;
+
+      if (userRole === "guest") {
+        return res.status(403).json({ error: "Access Denied. Public guest users cannot update records." });
+      }
+
+      const recordId = parseInt(id);
+      if (userRole === "staff") {
+        return res.status(403).json({ error: "Access Denied: Staff users can create and view records but cannot modify or delete existing records. Please contact a Manager or Administrator." });
+      }
+
       const b = req.body;
       const custName = b.customerName || b.customer_name;
       
@@ -629,7 +921,7 @@ async function startServer() {
         tradingQty: parseInt(b.tradingQty || b.trading_qty || 0),
         serviceQty: parseInt(b.serviceQty || b.service_qty || 0),
         otherQty: parseInt(b.otherQty || b.other_qty || 0)
-      }).where(eq(serviceRequests.id, parseInt(id)));
+      }).where(eq(serviceRequests.id, recordId));
 
       // Synchronize lead customer details to customers table on lead edit
       try {
@@ -677,20 +969,39 @@ async function startServer() {
   });
 
   // Delete lead registration
-  app.delete("/api/leads/:id", async (req, res) => {
+  app.delete("/api/leads/:id", requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
+      const userRole = getAuthUser(req).role;
+      if (userRole === "staff") {
+        return res.status(403).json({ error: "Access Denied: Staff users can create and view records but cannot modify or delete existing records. Please contact a Manager or Administrator." });
+      }
+      if (userRole !== "admin") {
+        return res.status(403).json({ error: "Access Denied. Only system administrators can delete records." });
+      }
+
       await db.delete(serviceRequests).where(eq(serviceRequests.id, parseInt(id)));
-      res.json({ success: true, message: "Lead registration deleted" });
+      res.json({ success: true, message: "Lead registration deleted successfully by Admin" });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
   });
 
   // Edit/Update service task
-  app.put("/api/services/:id", async (req, res) => {
+  app.put("/api/services/:id", requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
+      const userRole = getAuthUser(req).role;
+
+      if (userRole === "guest") {
+        return res.status(403).json({ error: "Access Denied. Public guest users cannot update records." });
+      }
+
+      const recordId = parseInt(id);
+      if (userRole === "staff") {
+        return res.status(403).json({ error: "Access Denied: Staff users can create and view records but cannot modify or delete existing records. Please contact a Manager or Administrator." });
+      }
+
       const b = req.body;
       await db.update(serviceRequests).set({
         customerName: b.customerName,
@@ -702,7 +1013,7 @@ async function startServer() {
         amount: b.amount,
         salesPerson: b.assignee,
         location: b.location
-      }).where(eq(serviceRequests.id, parseInt(id)));
+      }).where(eq(serviceRequests.id, recordId));
       res.json({ success: true, message: "Service ticket updated successfully" });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -710,20 +1021,29 @@ async function startServer() {
   });
 
   // Delete service task
-  app.delete("/api/services/:id", async (req, res) => {
+  app.delete("/api/services/:id", requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
+      const userRole = getAuthUser(req).role;
+      if (userRole === "staff") {
+        return res.status(403).json({ error: "Access Denied: Staff users can create and view records but cannot modify or delete existing records. Please contact a Manager or Administrator." });
+      }
+      if (userRole !== "admin") {
+        return res.status(403).json({ error: "Access Denied. Only system administrators can delete records." });
+      }
+
       await db.delete(serviceRequests).where(eq(serviceRequests.id, parseInt(id)));
-      res.json({ success: true, message: "Service ticket deleted" });
+      res.json({ success: true, message: "Service ticket deleted successfully by Admin" });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
   });
 
   // Edit/Update customer definition
-  app.put("/api/customers/:id", async (req, res) => {
+  app.put("/api/customers/:id", requireAuth, requireRoles("admin"), async (req, res) => {
     try {
       const { id } = req.params;
+
       const b = req.body;
       await db.update(customers).set({
         name: b.name,
@@ -734,30 +1054,53 @@ async function startServer() {
         implementationType: b.implementationType,
         vehicleCount: parseInt(b.vehicleCount || 0)
       }).where(eq(customers.id, parseInt(id)));
-      res.json({ success: true, message: "Customer account updated successfully" });
+      res.json({ success: true, message: "Customer account updated successfully by Admin" });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
   });
 
   // Delete customer definition
-  app.delete("/api/customers/:id", async (req, res) => {
+  app.delete("/api/customers/:id", requireAuth, requireRoles("admin"), async (req, res) => {
     try {
       const { id } = req.params;
+
       await db.delete(customers).where(eq(customers.id, parseInt(id)));
-      res.json({ success: true, message: "Customer account deleted" });
+      res.json({ success: true, message: "Customer account deleted successfully by Admin" });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
   });
 
   // Customer search
-  app.get("/api/customers", async (req, res) => {
+  app.get("/api/customers", requireAuth, async (req, res) => {
     try {
+      const authUser = getAuthUser(req);
+      const userRole = authUser.role;
+      const userName = normalizeUserName(authUser.name);
       const q = req.query.q as string;
-      const results = q 
+      const rawResults = q 
         ? await db.select().from(customers).where(or(like(customers.name, `%${q}%`), like(customers.contactName, `%${q}%`)))
         : await db.select().from(customers);
+
+      let results = rawResults;
+      if (userRole === "guest") {
+        results = rawResults.filter(c => normalizeUserName(c.createdBy || "") === userName);
+      } else if (userRole === "staff") {
+        const rawRequests = await db.select().from(serviceRequests).orderBy(desc(serviceRequests.id)).limit(1000);
+        const allowedCustomerNames = new Set(
+          rawRequests
+            .filter(r => {
+              const salesPerson = normalizeUserName(r.salesPerson || "");
+              const reqPerson = normalizeUserName(r.requestedPerson || "");
+              const createdByVal = normalizeUserName(r.createdBy || "");
+              return salesPerson === userName || reqPerson === userName || createdByVal === userName;
+            })
+            .map(r => normalizeUserName(r.customerName || ""))
+        );
+        results = rawResults.filter(c => allowedCustomerNames.has(normalizeUserName(c.name || "")) || normalizeUserName(c.createdBy || "") === userName);
+      }
+
       res.json({ results, total: results.length });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -765,16 +1108,140 @@ async function startServer() {
   });
 
   // Chat/AI endpoint
-  app.post("/api/chat", async (req, res) => {
+  app.post("/api/chat", requireAuth, async (req, res) => {
     try {
       const { message, history } = req.body;
+      const authUser = getAuthUser(req);
+      const userRole = authUser.role;
+      const userName = authUser.name.trim();
       
-      // Save user message
-      await db.insert(messages).values({ role: 'user', content: message });
+      // Save user message (partitioned by username)
+      await db.insert(messages).values({ 
+        role: 'user', 
+        content: message,
+        username: userName || 'guest'
+      });
 
-      // Fetch live DB Context (limiting to 40 recent items to prevent huge payload errors such as HTTP 413)
-      let fetchedCustomers = await db.select().from(customers).orderBy(desc(customers.id)).limit(40);
-      let fetchedRequests = await db.select().from(serviceRequests).orderBy(desc(serviceRequests.id)).limit(40);
+      // Guest security rules check
+      let prependAccessRestricted = false;
+      if (userRole === "guest") {
+        const normalized = message.toLowerCase().trim();
+        const attemptedBlockedAction = 
+          normalized.includes("show all") ||
+          normalized.includes("list all") ||
+          normalized.includes("view all") ||
+          normalized.includes("all records") ||
+          normalized.includes("all customers") ||
+          normalized.includes("all tickets") ||
+          normalized.includes("all registrations") ||
+          normalized.includes("every request") ||
+          normalized.includes("entire database") ||
+          normalized.includes("comprehensive") ||
+          normalized.includes("workload") || 
+          normalized.includes("technician workload") ||
+          normalized.includes("database summary") ||
+          normalized.includes("system summary") ||
+          normalized.includes("system-wide") ||
+          normalized.includes("show athul") ||
+          normalized.includes("athul tickets") ||
+          normalized.includes("other guest") ||
+          normalized.includes("other guests") ||
+          normalized.includes("complete customer database");
+
+        if (attemptedBlockedAction) {
+          prependAccessRestricted = true;
+        }
+      }
+
+      // Staff security rules check
+      if (userRole === "staff") {
+        const normalized = message.toLowerCase().trim();
+        const attemptedBlockedAction = 
+          normalized.includes("edit ticket") ||
+          normalized.includes("update customer details") ||
+          normalized.includes("change registration status") ||
+          normalized.includes("delete ticket") ||
+          normalized.includes("modify previous record") ||
+          normalized.includes("modify record") ||
+          normalized.includes("change status") ||
+          normalized.includes("update customer") ||
+          normalized.includes("delete registration") ||
+          normalized.includes("edit registration") ||
+          normalized.includes("reassign ticket") ||
+          normalized.includes("re-assign ticket") ||
+          normalized.includes("delete lead") ||
+          normalized.includes("edit lead") ||
+          normalized.includes("edit customer") ||
+          normalized.includes("reassign") ||
+          normalized.includes("re-assign") ||
+          normalized.includes("delete customer") ||
+          normalized.includes("update ticket") ||
+          normalized.includes("update details") ||
+          normalized.includes("update status") ||
+          normalized.includes("modify ticket") ||
+          normalized.includes("modify customer") ||
+          /\b(edit|delete|modify|reassign|re-assign)\b/.test(normalized);
+
+        if (attemptedBlockedAction) {
+          const deniedMessage = "Access Denied: Staff users can create and view records but cannot modify or delete existing records. Please contact a Manager or Administrator.";
+          await db.insert(messages).values({ 
+            role: 'assistant', 
+            content: deniedMessage,
+            username: userName || 'guest'
+          });
+          return res.json({ reply: deniedMessage });
+        }
+      }
+
+      // Fetch live DB Context dynamically filtered by user authorization limits
+      let fetchedCustomers: any[] = [];
+      let fetchedRequests: any[] = [];
+
+      if (userRole === "admin") {
+        fetchedCustomers = await db.select().from(customers).orderBy(desc(customers.id)).limit(40);
+        fetchedRequests = await db.select().from(serviceRequests).orderBy(desc(serviceRequests.id)).limit(40);
+      } else if (userRole === "staff" && userName) {
+        // Fetch up to 1000 service requests first to filter
+        const rawRequests = await db.select().from(serviceRequests)
+          .orderBy(desc(serviceRequests.id))
+          .limit(1000);
+
+        const lowerUser = userName.toLowerCase().trim();
+        fetchedRequests = rawRequests.filter(r => {
+          const salesPerson = (r.salesPerson || "").trim().toLowerCase();
+          const reqPerson = (r.requestedPerson || "").trim().toLowerCase();
+          const createdByVal = (r.createdBy || "").trim().toLowerCase();
+          return salesPerson === lowerUser || reqPerson === lowerUser || createdByVal === lowerUser;
+        }).slice(0, 60);
+
+        // Collect allowed customer name set
+        const allowedCustomerNames = new Set(
+          fetchedRequests.map(r => (r.customerName || "").trim().toLowerCase())
+        );
+
+        // Fetch/filter customers only where customer.name matches or customer.createdBy matches logged-in user
+        const rawCustomers = await db.select().from(customers).orderBy(desc(customers.id)).limit(1000);
+        fetchedCustomers = rawCustomers.filter(c => {
+          const cName = (c.name || "").trim().toLowerCase();
+          const cCreatedBy = (c.createdBy || "").trim().toLowerCase();
+          return allowedCustomerNames.has(cName) || cCreatedBy === lowerUser;
+        });
+      } else if (userRole === "guest" && userName) {
+        // Guest can retrieve ONLY records they created themselves
+        const lowerUser = userName.toLowerCase().trim();
+        fetchedCustomers = await db.select().from(customers)
+          .where(eq(customers.createdBy, lowerUser))
+          .orderBy(desc(customers.id))
+          .limit(40);
+          
+        fetchedRequests = await db.select().from(serviceRequests)
+          .where(eq(serviceRequests.createdBy, lowerUser))
+          .orderBy(desc(serviceRequests.id))
+          .limit(40);
+      } else {
+        fetchedCustomers = [];
+        fetchedRequests = [];
+      }
 
       // Extract unique alphanumeric keywords from the message to also search older records dynamically
       const keywords = message.toLowerCase()
@@ -782,7 +1249,7 @@ async function startServer() {
         .split(/\s+/)
         .filter((w: string) => w.length >= 4 && !["what", "show", "list", "with", "this", "that", "please", "lead", "ticket", "status", "save", "update", "customer", "service", "active", "queue", "info", "record", "from"].includes(w));
 
-      if (keywords.length > 0) {
+      if (keywords.length > 0 && userRole !== "guest") {
         try {
           // Perform targeted searches to pull in older records if they are explicitly mentioned
           for (const word of keywords) {
@@ -791,17 +1258,52 @@ async function startServer() {
               like(customers.contactName, `%${word}%`)
             ));
             for (const c of extraCustomers) {
-              if (!fetchedCustomers.some(fc => fc.id === c.id)) {
-                fetchedCustomers.push(c);
+              if (userRole === "admin") {
+                if (!fetchedCustomers.some(fc => fc.id === c.id)) {
+                  fetchedCustomers.push(c);
+                }
+              } else if (userRole === "staff" && userName) {
+                // Any extra customer found by keyword must still be allowed only if:
+                // its name is in the staff user's allowed customer name set OR
+                // customer.createdBy matches the logged-in user.
+                const lowerUser = userName.toLowerCase().trim();
+                const cName = (c.name || "").trim().toLowerCase();
+                const cCreatedBy = (c.createdBy || "").trim().toLowerCase();
+                const allowedCustomerNames = new Set(
+                  fetchedRequests.map(r => (r.customerName || "").trim().toLowerCase())
+                );
+                if (allowedCustomerNames.has(cName) || cCreatedBy === lowerUser) {
+                  if (!fetchedCustomers.some(fc => fc.id === c.id)) {
+                    fetchedCustomers.push(c);
+                  }
+                }
               }
             }
 
-            const extraRequests = await db.select().from(serviceRequests).where(or(
-              like(serviceRequests.customerName, `%${word}%`),
-              like(serviceRequests.contactName, `%${word}%`),
-              like(serviceRequests.issueDescription, `%${word}%`),
-              like(serviceRequests.comment, `%${word}%`)
-            ));
+            let extraRequests: any[] = [];
+            if (userRole === "admin") {
+              extraRequests = await db.select().from(serviceRequests).where(or(
+                like(serviceRequests.customerName, `%${word}%`),
+                like(serviceRequests.contactName, `%${word}%`),
+                like(serviceRequests.issueDescription, `%${word}%`),
+                like(serviceRequests.comment, `%${word}%`)
+              ));
+            } else if (userRole === "staff" && userName) {
+              const rawExtra = await db.select().from(serviceRequests).where(or(
+                like(serviceRequests.customerName, `%${word}%`),
+                like(serviceRequests.contactName, `%${word}%`),
+                like(serviceRequests.issueDescription, `%${word}%`),
+                like(serviceRequests.comment, `%${word}%`)
+              )).limit(500);
+              const lowerUser = userName.toLowerCase().trim();
+              extraRequests = rawExtra.filter(r => {
+                const salesPerson = (r.salesPerson || "").trim().toLowerCase();
+                const reqPerson = (r.requestedPerson || "").trim().toLowerCase();
+                const createdByVal = (r.createdBy || "").trim().toLowerCase();
+                return salesPerson === lowerUser || reqPerson === lowerUser || createdByVal === lowerUser;
+              });
+            }
+
             for (const r of extraRequests) {
               if (!fetchedRequests.some(fr => fr.id === r.id)) {
                 fetchedRequests.push(r);
@@ -857,10 +1359,23 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Customer: "${s.customerName}" | 
         console.error("Failed to load prompts dynamically, using in-memory defaults:", err);
       }
 
-      const systemInstruction = `${currentPrompts.chat_assistant}
+      let systemInstruction = `${currentPrompts.chat_assistant}
 
 ${dbContextStr}
+`;
 
+      if (userRole === "guest") {
+        systemInstruction += `
+=== GUEST ROLE SECURITY CONSTRAINTS ===
+- You are interacting with a GUEST user (UserName: "${userName}").
+- GUEST users can create records, but they are STRICTLY RESTRICTED to viewing only records created by themselves.
+- Under NO circumstances can you show, describe, or summarize records of other users, technician workloads, or system-wide summaries.
+- If the guest user asks to view all records, all customers, all tickets, database summaries, technician workloads, or records created by other users (e.g. Athul), you MUST respond exactly with: "Access Restricted: You can only view records created by your account." and then list only the records that are present in CURRENT CRM DATABASE RECORDS (which have already been filtered to their own records).
+- Be polite, and keep the user's focus on creating new records or managing their own submitted items.
+`;
+      }
+
+      systemInstruction += `
 CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
 1. ACT HUMAN & OPERATIONAL: Reply like a human sales or fleets officer in Dubai of Synosys Fleet Intelligence. Keep conversations natural, friendly, highly custom, and warm. Use phrases like "Oh, let me look that up!", "Great, Vishnu!", or "Welcome back."
 2. DYNAMIC LOOKUP, MATCH CLARIFICATION & NEW CUSTOMER CHECK (CRITICAL):
@@ -906,7 +1421,6 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
    - When a new chat message arrives initiating a separate request, or when a user begins a completely new service ticket or lead registration task, you MUST NOT implicitly carry over the 'Requested Person' from a previous conversation task or from history.
    - For example, if a previous service ticket was requested by "Athul", and now the user has started a new request (e.g., "create a service for customer crescent tomorrow"), do NOT default or assume that the requested person is "Athul" again.
    - You MUST explicitly ask the user who requested the ticket: "Who is the Requested Person (staff) for this request? Is it still Athul or someone else from our staff list (e.g., Faizal, Celine, Amrutha, Midhun, etc.)?" unless they provide the staff name explicitly within the prompt of this new request. Justify that you need to clarify since the requester may have changed since the last task.
-
 `;
 
       let replyReceived = false;
@@ -1032,20 +1546,45 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
         }
       }
 
-      // Process records
-      const savedResult = await handleAIRecordSave(reply);
+      // Process records using role & username permissions
+      const savedResult = await handleAIRecordSave(reply, userRole, userName);
 
-      await db.insert(messages).values({ role: 'assistant', content: savedResult.reply });
-      return res.json({ reply: savedResult.reply, savedRecord: savedResult.savedRecord });
+      let finalReply = savedResult.reply;
+      if (prependAccessRestricted && !finalReply.startsWith("Access Restricted:")) {
+        finalReply = "Access Restricted: You can only view records created by your account.\n\n" + finalReply;
+      }
+
+      // Save assistant message partitioned by username
+      await db.insert(messages).values({ 
+        role: 'assistant', 
+        content: finalReply,
+        username: userName || 'guest'
+      });
+      
+      return res.json({ reply: finalReply, savedRecord: savedResult.savedRecord });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
   });
 
   // Get chat history
-  app.get("/api/chat/history", async (req, res) => {
+  app.get("/api/chat/history", requireAuth, async (req, res) => {
     try {
-      const history = await db.select().from(messages).orderBy(messages.timestamp);
+      const authUser = getAuthUser(req);
+      const userRole = authUser.role;
+      const userName = authUser.name.trim();
+
+      let history;
+      if (userRole === "admin") {
+        // Admins can see or review global chat transcripts
+        history = await db.select().from(messages).orderBy(messages.timestamp);
+      } else {
+        // Filter by username specifically
+        const targetUsername = userName || "guest";
+        history = await db.select().from(messages)
+          .where(eq(messages.username, targetUsername))
+          .orderBy(messages.timestamp);
+      }
       res.json(history);
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -1054,7 +1593,7 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
 
   // --- Log Ingestion & Parsing ---
 
-  app.post("/api/ingest", async (req, res) => {
+  app.post("/api/ingest", requireAuth, requireRoles("admin", "staff"), async (req, res) => {
     try {
       const { rawLog } = req.body;
       if (!rawLog) return res.status(400).json({ error: "Missing raw log" });
@@ -1156,7 +1695,7 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
   });
 
   // Bulk save ingested data
-  app.post("/api/ingest/save", async (req, res) => {
+  app.post("/api/ingest/save", requireAuth, requireRoles("admin"), async (req, res) => {
     try {
       const { records } = req.body;
       for (const rec of records) {
