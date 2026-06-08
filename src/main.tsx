@@ -16,7 +16,17 @@ const renderStaticMessage = (title: string, detail: string) => {
   `;
 };
 
+const isIgnorableDevServerError = (value: unknown) => {
+  const message = value instanceof Error ? value.message : String(value || '');
+  return message.includes('WebSocket closed without opened');
+};
+
 window.addEventListener('error', (event) => {
+  if (isIgnorableDevServerError(event.error || event.message)) {
+    event.preventDefault();
+    return;
+  }
+
   renderStaticMessage(
     'SynoHub could not start',
     event.error instanceof Error ? event.error.message : event.message || 'A browser runtime error stopped the app.'
@@ -25,6 +35,11 @@ window.addEventListener('error', (event) => {
 
 window.addEventListener('unhandledrejection', (event) => {
   const reason = event.reason;
+  if (isIgnorableDevServerError(reason)) {
+    event.preventDefault();
+    return;
+  }
+
   renderStaticMessage(
     'SynoHub could not start',
     reason instanceof Error ? reason.message : String(reason || 'A browser promise error stopped the app.')

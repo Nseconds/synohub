@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express, { type NextFunction, type Request, type Response } from "express";
+import { createServer as createHttpServer } from "http";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { db, pool } from "./src/db";
@@ -586,6 +587,7 @@ async function handleAIRecordSave(reply: string, userRole: string = "guest", use
 async function startServer() {
   const app = express();
   const PORT = 3000;
+  const httpServer = createHttpServer(app);
 
   try {
     await initDB();
@@ -1748,7 +1750,12 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: {
+          server: httpServer,
+        },
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
@@ -1760,7 +1767,7 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
     });
   }
 
-  app.listen(PORT, "0.0.0.0", async () => {
+  httpServer.listen(PORT, "0.0.0.0", async () => {
     console.log(`Server running on http://localhost:${PORT}`);
     
     // Check Ollama status
