@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { LayoutDashboard, Users, ClipboardList as TooltipIcon, MessageSquare, Plus, Search, Send, MapPin, Package, Clock, Phone, Mail, ChevronRight, Activity, Zap, Shield, Database, FileUp, Sparkles, CheckCircle2, Minus, Square, X, ClipboardList } from "lucide-react";
+import { LayoutDashboard, Users, ClipboardList as TooltipIcon, MessageSquare, Plus, Search, Send, MapPin, Package, Clock, Phone, Mail, ChevronRight, Activity, Zap, Shield, Database, FileUp, Sparkles, CheckCircle2, Minus, Square, X, ClipboardList, Eye } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "./lib/utils";
 import axios from "axios";
@@ -104,6 +104,13 @@ const PAYMENT_OPTIONS = ["Applicable", "Not Applicable"];
 const INVOICE_STATUSES = ["Not Invoiced", "Invoiced"];
 const PAYMENT_STATUSES = ["Not Paid", "Paid"];
 
+const getChatTargetLabel = (target: string) => {
+  if (target === "admin") return "Admin";
+  if (target === "guest") return "Guest";
+  if (target.startsWith("staff:")) return target.replace("staff:", "");
+  return target;
+};
+
 const isValidStoredUser = (value: any): value is { name: string; role: string; token: string } => {
   return Boolean(
     value &&
@@ -175,16 +182,23 @@ const StatCard = ({ label, value, icon: Icon, color, subValue }: { label: string
 
 
 
-const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInputLoaded, userKey }: { onRecordSaved?: (savedRecord?: any) => void, onNewStaffDetected?: (name: string) => void, forcedInput?: string, onInputLoaded?: () => void, userKey?: string }) => {
+const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInputLoaded, userKey, currentUser, staffOptions = REQUESTED_PEOPLE }: { onRecordSaved?: (savedRecord?: any) => void, onNewStaffDetected?: (name: string) => void, forcedInput?: string, onInputLoaded?: () => void, userKey?: string, currentUser?: { name: string; role: string; token: string } | null, staffOptions?: string[] }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [selectedChatTarget, setSelectedChatTarget] = useState("admin");
+  const isAdminViewingOtherChat = currentUser?.role === "admin" && selectedChatTarget !== "admin";
 
   useEffect(() => {
     setMessages([]);
     fetchHistory();
-  }, [userKey]);
+  }, [userKey, selectedChatTarget]);
+
+  useEffect(() => {
+    if (currentUser?.role !== "admin") return;
+    setSelectedChatTarget("admin");
+  }, [currentUser?.role]);
 
   useEffect(() => {
     if (forcedInput) {
@@ -201,7 +215,10 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
 
   const fetchHistory = async () => {
     try {
-      const res = await axios.get("/api/chat/history");
+      const url = currentUser?.role === "admin" 
+        ? `/api/chat/history?target=${encodeURIComponent(selectedChatTarget)}` 
+        : "/api/chat/history";
+      const res = await axios.get(url);
       setMessages(res.data);
     } catch (e) {
       console.error("Failed to fetch chat history", e);
@@ -209,6 +226,7 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
   };
 
   const handleSend = async () => {
+    if (isAdminViewingOtherChat) return;
     if (!input.trim() || loading) return;
     const userMsg = input;
     setInput("");
@@ -227,7 +245,11 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
 
     try {
       const history = messages.slice(-5).map(m => ({ role: m.role, content: m.content }));
-      const res = await axios.post("/api/chat", { message: userMsg, history });
+      const payload: any = { message: userMsg, history };
+      if (currentUser?.role === "admin") {
+        payload.selectedChatTarget = selectedChatTarget;
+      }
+      const res = await axios.post("/api/chat", payload);
       setMessages(prev => [...prev, { role: 'assistant', content: res.data.reply }]);
       if (res.data.savedRecord) {
         if (onRecordSaved) {
@@ -247,6 +269,7 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
   };
 
   const handlePresetClick = async (promptText: string) => {
+    if (isAdminViewingOtherChat) return;
     if (loading) return;
     setMessages(prev => [...prev, { role: 'user', content: promptText }]);
     setLoading(true);
@@ -263,7 +286,11 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
 
     try {
       const history = messages.slice(-5).map(m => ({ role: m.role, content: m.content }));
-      const res = await axios.post("/api/chat", { message: promptText, history });
+      const payload: any = { message: promptText, history };
+      if (currentUser?.role === "admin") {
+        payload.selectedChatTarget = selectedChatTarget;
+      }
+      const res = await axios.post("/api/chat", payload);
       setMessages(prev => [...prev, { role: 'assistant', content: res.data.reply }]);
       if (res.data.savedRecord) {
         if (onRecordSaved) {
@@ -301,6 +328,37 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
           </div>
         </div>
 
+        {/* Admin Dynamic Persona Selector */}
+        {currentUser?.role === "admin" && (
+          <div className="px-6 py-3 bg-zinc-50 border-b border-zinc-200 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2 font-semibold text-zinc-700">
+              <Eye size={14} className="text-zinc-500" />
+              <span>Viewing chat: <span className="text-teal-accent font-bold">{getChatTargetLabel(selectedChatTarget)}</span></span>
+              {isAdminViewingOtherChat && (
+                <span className="ml-2 rounded border border-rose-200 bg-rose-50 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-rose-600">
+                  Read Only
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-zinc-500 font-medium">Chat as:</span>
+              <select
+                value={selectedChatTarget}
+                onChange={(e) => setSelectedChatTarget(e.target.value)}
+                className="bg-white border border-zinc-200 rounded px-2 py-1 text-xs text-zinc-800 focus:outline-none focus:border-teal-accent font-medium cursor-pointer"
+              >
+                <option value="admin">Admin</option>
+                <option value="guest">Guest</option>
+                {staffOptions.map((p) => (
+                  <option key={p} value={`staff:${p}`}>
+                    Staff: {p}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
+
         {/* Messages */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-hide bg-zinc-50/30">
           {messages.length === 0 && (
@@ -322,7 +380,7 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
               )}
             >
               <div className={cn(
-                "p-4 rounded-2xl text-xs leading-relaxed shadow-sm",
+                "p-4 rounded-2xl text-xs leading-relaxed shadow-sm whitespace-pre-line",
                 m.role === 'user' 
                   ? "bg-zinc-800 text-white rounded-br-none" 
                   : "bg-white text-zinc-700 rounded-bl-none border border-zinc-100"
@@ -351,12 +409,13 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-              placeholder="Type your message..." 
-              className="w-full bg-zinc-50 border border-zinc-200 rounded-xl py-3.5 pl-4 pr-12 text-xs text-zinc-900 placeholder-zinc-400 focus:outline-none focus:border-teal-accent/50 transition-all font-medium"
+              disabled={isAdminViewingOtherChat}
+              placeholder={isAdminViewingOtherChat ? "Read-only view. Switch to Admin to chat." : "Type your message..."} 
+              className="w-full bg-zinc-50 border border-zinc-200 rounded-xl py-3.5 pl-4 pr-12 text-xs text-zinc-900 placeholder-zinc-400 focus:outline-none focus:border-teal-accent/50 transition-all font-medium disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
             />
             <button 
               onClick={handleSend}
-              disabled={loading || !input.trim()}
+              disabled={isAdminViewingOtherChat || loading || !input.trim()}
               className="absolute right-2 top-1/2 -translate-y-1/2 p-2.5 text-zinc-400 hover:text-teal-accent disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
               <Send size={16} />
@@ -2382,7 +2441,9 @@ export default function App() {
                   <p className="text-sm text-zinc-500 mt-2">Manage your entire fleet via cognitive automation.</p>
                 </div>
                 <ChatInterface 
+                  currentUser={user}
                   userKey={user ? `${user.role}:${user.name}` : "guest:guest"}
+                  staffOptions={requestedPeopleList}
                   forcedInput={prefilledChatPrompt}
                   onInputLoaded={() => setPrefilledChatPrompt("")}
                   onNewStaffDetected={(name) => {

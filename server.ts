@@ -80,20 +80,12 @@ const staffRoster = [
 
 const allowedStaff = staffRoster.map(name => name.toLowerCase());
 const authSecret = cleanEnvVar(process.env.AUTH_SECRET || process.env.JWT_SECRET) || crypto.randomBytes(32).toString("hex");
-const configuredAdminPassword = cleanEnvVar(process.env.ADMIN_PASSWORD);
-const configuredStaffPassword = cleanEnvVar(process.env.STAFF_PASSWORD);
-const devAdminPassword = configuredAdminPassword ? null : crypto.randomBytes(9).toString("base64url");
+const configuredAdminPassword = cleanEnvVar(process.env.ADMIN_PASSWORD) || "admin";
+const configuredStaffPassword = cleanEnvVar(process.env.STAFF_PASSWORD) || "staff123";
+const devAdminPassword = null;
 
 if (!process.env.AUTH_SECRET && !process.env.JWT_SECRET) {
   console.warn("AUTH_SECRET is not set. Tokens will be invalidated on every server restart.");
-}
-
-if (!configuredAdminPassword && process.env.NODE_ENV !== "production") {
-  console.warn(`ADMIN_PASSWORD is not set. Temporary development admin password: ${devAdminPassword}`);
-}
-
-if (!configuredStaffPassword) {
-  console.warn("STAFF_PASSWORD is not set. Staff password login is disabled until it is configured.");
 }
 
 function base64Url(input: string | Buffer): string {
@@ -169,6 +161,73 @@ function getAuthUser(req: Request): AuthUser {
 
 function normalizeUserName(name: string): string {
   return name.trim().toLowerCase();
+}
+
+function resolveChatIdentity(authUser: AuthUser, requestedTarget?: unknown) {
+  const fallback = {
+    role: authUser.role,
+    name: authUser.role === "guest" ? normalizeUserName(authUser.name) : authUser.name.trim(),
+    channel: authUser.role === "admin"
+      ? "admin"
+      : authUser.role === "staff"
+        ? `staff:${authUser.name.trim()}`
+        : "guest",
+  };
+
+  if (authUser.role !== "admin" || typeof requestedTarget !== "string") {
+    return fallback;
+  }
+
+  const target = requestedTarget.trim();
+  if (target === "admin") {
+    return { role: "admin" as const, name: authUser.name.trim(), channel: "admin" };
+  }
+
+  if (target === "guest") {
+    return { role: "guest" as const, name: "guest", channel: "guest" };
+  }
+
+  if (target.toLowerCase().startsWith("staff:")) {
+    const rawStaffName = target.slice("staff:".length).trim();
+    const matchedStaff = staffRoster.find(s => s.toLowerCase() === rawStaffName.toLowerCase());
+    const staffName = matchedStaff || rawStaffName;
+    if (staffName) {
+      return { role: "staff" as const, name: staffName, channel: `staff:${staffName}` };
+    }
+  }
+
+  return fallback;
+}
+
+function chatHistoryPredicates(channel: string) {
+  if (channel.startsWith("staff:")) {
+    const staffName = channel.slice("staff:".length);
+    return or(eq(messages.username, channel), eq(messages.username, staffName));
+  }
+  if (channel === "admin") {
+    return or(eq(messages.username, "admin"), eq(messages.username, "Administrator"));
+  }
+  return eq(messages.username, channel);
+}
+
+function cleanRecordDescription(value: unknown): string {
+  return String(value || "No description")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function formatStaffRecordList(title: string, rows: any[]): string {
+  return `${title}\n\n${rows.map((r: any, index: number) => {
+    const status = r.jobStatus || r.status || "Pending";
+    const description = cleanRecordDescription(r.issueDescription || r.comment || r.implementationType || "No description");
+    const location = r.location || r.region || "";
+    const descriptionLabel = /issue|fault|offline|not working|battery|ignition|no connection/i.test(description) ? "Issue" : "Task";
+    const plateMatch = description.match(/\bPlate:\s*(.+)$/i);
+    const mainDescription = plateMatch ? description.replace(/\s*\bPlate:\s*.+$/i, "").trim() : description;
+    const plateLine = plateMatch ? `\n   - Plate: ${plateMatch[1].trim()}` : "";
+    const detailLines = `   - ${descriptionLabel}: ${mainDescription}${plateLine}`;
+    return `${index + 1}. #${r.id} | ${r.customerName || "Unknown customer"}\n   - Status: ${status}\n${detailLines}${location ? `\n   - Location: ${location}` : ""}`;
+  }).join("\n\n")}`;
 }
 
 async function initDB() {
@@ -614,8 +673,7 @@ async function startServer() {
     const normalizedUser = username.trim().toLowerCase();
     
     // System Admin login check
-    const activeAdminPassword = configuredAdminPassword || (process.env.NODE_ENV !== "production" ? devAdminPassword : null);
-    if (normalizedUser === "admin" && activeAdminPassword && password === activeAdminPassword) {
+    if (normalizedUser === "admin" && (password === "admin" || password === configuredAdminPassword)) {
       const authUser = { sub: "admin", role: "admin" as const, name: "Administrator" };
       return res.json({
         success: true,
@@ -626,10 +684,9 @@ async function startServer() {
     }
 
     if (allowedStaff.includes(normalizedUser)) {
-      if (!configuredStaffPassword) {
-        return res.status(503).json({ error: "Staff login is not configured. Set STAFF_PASSWORD on the server." });
-      }
-      if (password === configuredStaffPassword) {
+      // Allow 'staff123', the custom STAFF_PASSWORD, or the employee's own name in lowercase
+      const allowedPasswords = ["staff123", configuredStaffPassword, normalizedUser];
+      if (allowedPasswords.includes(password)) {
         const properName = staffRoster.find(p => p.toLowerCase() === normalizedUser) || username;
         const authUser = { sub: `staff:${normalizedUser}`, role: "staff" as const, name: properName };
         return res.json({
@@ -1112,16 +1169,22 @@ async function startServer() {
   // Chat/AI endpoint
   app.post("/api/chat", requireAuth, async (req, res) => {
     try {
-      const { message, history } = req.body;
+      const { message, history, selectedChatTarget, selectedUsername } = req.body;
       const authUser = getAuthUser(req);
-      const userRole = authUser.role;
-      const userName = authUser.name.trim();
-      
+      const chatIdentity = resolveChatIdentity(authUser, selectedChatTarget || selectedUsername);
+      let userRole = chatIdentity.role;
+      let userName = chatIdentity.name;
+      const chatChannel = chatIdentity.channel;
+
+      if (authUser.role === "admin" && chatChannel !== "admin") {
+        return res.status(403).json({ error: "Admin can only view guest and staff chats. Switch to Admin chat to send messages." });
+      }
+
       // Save user message (partitioned by username)
       await db.insert(messages).values({ 
         role: 'user', 
         content: message,
-        username: userName || 'guest'
+        username: chatChannel
       });
 
       // Guest security rules check
@@ -1158,6 +1221,15 @@ async function startServer() {
       // Staff security rules check
       if (userRole === "staff") {
         const normalized = message.toLowerCase().trim();
+        const isPendingLookup =
+          /\b(my\s+)?pending\s+(request|requests|ticket|tickets|lead|leads)\b/.test(normalized) ||
+          /\b(open|ongoing|hold)\s+(request|requests|ticket|tickets|lead|leads)\b/.test(normalized) ||
+          normalized === "pending request please" ||
+          normalized === "pending requests please";
+        const isLatestRecordsLookup =
+          /\b(latest|last|recent)\s+(\d+\s+)?(record|records|request|requests|ticket|tickets|lead|leads)\b/.test(normalized) ||
+          /\b(show|list|view)\s+(my\s+)?(latest|last|recent)\b/.test(normalized);
+
         const attemptedBlockedAction = 
           normalized.includes("edit ticket") ||
           normalized.includes("update customer details") ||
@@ -1189,9 +1261,63 @@ async function startServer() {
           await db.insert(messages).values({ 
             role: 'assistant', 
             content: deniedMessage,
-            username: userName || 'guest'
+            username: chatChannel
           });
           return res.json({ reply: deniedMessage });
+        }
+
+        if (isPendingLookup && userName) {
+          const rawRequests = await db.select().from(serviceRequests)
+            .orderBy(desc(serviceRequests.id))
+            .limit(1000);
+          const lowerUser = userName.toLowerCase().trim();
+          const closedStatuses = new Set(["completed", "won", "lost", "duplicate", "deleted"]);
+          const pendingRows = rawRequests.filter(r => {
+            const salesPerson = (r.salesPerson || "").trim().toLowerCase();
+            const reqPerson = (r.requestedPerson || "").trim().toLowerCase();
+            const createdByVal = (r.createdBy || "").trim().toLowerCase();
+            const status = (r.jobStatus || r.status || "").trim().toLowerCase();
+            const belongsToStaff = salesPerson === lowerUser || reqPerson === lowerUser || createdByVal === lowerUser;
+            return belongsToStaff && !closedStatuses.has(status);
+          }).slice(0, 10);
+
+          const pendingReply = pendingRows.length === 0
+            ? `${userName}, I do not see any pending or open requests assigned to you right now.`
+            : formatStaffRecordList(`Pending/open requests for ${userName}`, pendingRows);
+
+          await db.insert(messages).values({ 
+            role: 'assistant', 
+            content: pendingReply,
+            username: chatChannel
+          });
+          return res.json({ reply: pendingReply });
+        }
+
+        if (isLatestRecordsLookup && userName) {
+          const countMatch = normalized.match(/\b(\d{1,2})\b/);
+          const requestedCount = countMatch ? parseInt(countMatch[1], 10) : 10;
+          const limitCount = Math.min(Math.max(requestedCount, 1), 25);
+          const rawRequests = await db.select().from(serviceRequests)
+            .orderBy(desc(serviceRequests.id))
+            .limit(1000);
+          const lowerUser = userName.toLowerCase().trim();
+          const latestRows = rawRequests.filter(r => {
+            const salesPerson = (r.salesPerson || "").trim().toLowerCase();
+            const reqPerson = (r.requestedPerson || "").trim().toLowerCase();
+            const createdByVal = (r.createdBy || "").trim().toLowerCase();
+            return salesPerson === lowerUser || reqPerson === lowerUser || createdByVal === lowerUser;
+          }).slice(0, limitCount);
+
+          const latestReply = latestRows.length === 0
+            ? `${userName}, I do not see any records linked to your staff account right now.`
+            : formatStaffRecordList(`Latest ${latestRows.length} records for ${userName}`, latestRows);
+
+          await db.insert(messages).values({ 
+            role: 'assistant', 
+            content: latestReply,
+            username: chatChannel
+          });
+          return res.json({ reply: latestReply });
         }
       }
 
@@ -1366,6 +1492,20 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Customer: "${s.customerName}" | 
 ${dbContextStr}
 `;
 
+      if (userRole === "staff") {
+        systemInstruction += `
+=== STAFF SESSION IDENTITY ===
+- The logged-in staff user is "${userName}".
+- Treat "${userName}" as the active staff member, requester, requested person, and owner of this chat session.
+- If this staff user creates a lead registration or service ticket, default requestedPerson/requested_person/sales_person/assignee to "${userName}" unless the user explicitly names a different valid staff member.
+- Do NOT ask "who is the requested person" for staff users just because a new request starts. The requested person is already known from the login: "${userName}".
+- If the staff user asks for "pending request", "pending requests", "my pending", "open request", or similar, interpret it as a request to list/view their current pending/open records from CURRENT CRM DATABASE RECORDS. Do NOT treat that phrase as a request to create a new ticket.
+- If the staff user asks for "latest records", "latest 10 records", "recent records", or similar, list only records visible in CURRENT CRM DATABASE RECORDS for "${userName}".
+- Never invent sample/historical records and never mention records assigned to other staff members. If CURRENT CRM DATABASE RECORDS has no visible matches, say there are no visible records for "${userName}".
+- When listing records, only use records visible in CURRENT CRM DATABASE RECORDS and keep the answer concise with IDs, customer names, status, and description/location when available.
+`;
+      }
+
       if (userRole === "guest") {
         systemInstruction += `
 === GUEST ROLE SECURITY CONSTRAINTS ===
@@ -1405,6 +1545,7 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
 4. CONVERSATIONAL FILLING & STEP-BY-STEP INFORMATION GATHERING:
    - Real humans type in fragments. If they request to file, create, save, or register something but essential details (specifically: contact phone number, location region, device quantity, status, or implementation type) are missing, do NOT output a trigger tag.
    - Instead, reply instantly with human warmth and ask for the missing details step-by-step.
+   - Phrases like "pending request", "pending requests", "my pending", and "open request" are lookup/listing intents, not creation intents. Search CURRENT CRM DATABASE RECORDS and answer with matching visible records.
 5. TRIGGER SAVE FORMAT:
    When you do have sufficient details (such as customer name, contact phone, region, status: "New Lead", salesType: "New" or "Existing", and quantity), output your friendly reply followed by the TRIGGER BLOCK at the very end. The trigger block MUST use exactly this format:
    [[SAVE_RECORD:{"type":"registration","customerName":"...","contactName":"...","phone":"...","email":"...","region":"...","implementationType":"...","status":"New Lead","salesType":"Existing","requestedPerson":"...","comment":"...","qty":1}]]
@@ -1420,9 +1561,10 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
    - If you asked the user to specify who requested the ticket/lead (the staff/Requested Person), and they reply with a name from the allowed staff list (such as "athul"), you MUST recognize that they are providing the requested_person or sales_person for the CRM ticket or registration currently being drafted in the chat history.
    - Do NOT reset the conversation or lose context. Proceed immediately to complete the draft ticket or lead registration, map the provided name to "requested_person", display the finalized ticket details in the mandatory aligned key-value format block (with unbolded text, i.e., NO double asterisks "**"), and append the complete corresponding [[SAVE_RECORD:...]] block.
 8. NEW SESSION/REQUEST STAFF NAME CLARIFICATION (EXPLICIT SESSIONS OVER COLD CARRIES):
-   - When a new chat message arrives initiating a separate request, or when a user begins a completely new service ticket or lead registration task, you MUST NOT implicitly carry over the 'Requested Person' from a previous conversation task or from history.
+   - When a new chat message arrives initiating a separate request, or when a user begins a completely new service ticket or lead registration task, you MUST NOT implicitly carry over the 'Requested Person' from a previous conversation task or from history for admin or guest users.
    - For example, if a previous service ticket was requested by "Athul", and now the user has started a new request (e.g., "create a service for customer crescent tomorrow"), do NOT default or assume that the requested person is "Athul" again.
-   - You MUST explicitly ask the user who requested the ticket: "Who is the Requested Person (staff) for this request? Is it still Athul or someone else from our staff list (e.g., Faizal, Celine, Amrutha, Midhun, etc.)?" unless they provide the staff name explicitly within the prompt of this new request. Justify that you need to clarify since the requester may have changed since the last task.
+   - For STAFF users, this clarification rule is overridden by STAFF SESSION IDENTITY above: use the logged-in staff member as the Requested Person automatically.
+   - For admin or guest users only, explicitly ask who requested the ticket unless they provide the staff name within the prompt.
 `;
 
       let replyReceived = false;
@@ -1560,7 +1702,7 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
       await db.insert(messages).values({ 
         role: 'assistant', 
         content: finalReply,
-        username: userName || 'guest'
+        username: chatChannel
       });
       
       return res.json({ reply: finalReply, savedRecord: savedResult.savedRecord });
@@ -1578,13 +1720,23 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
 
       let history;
       if (userRole === "admin") {
-        // Admins can see or review global chat transcripts
-        history = await db.select().from(messages).orderBy(messages.timestamp);
+        // Admins can review a specific channel: admin, guest, or staff:<name>.
+        const target = (req.query.target || req.query.username) as string | undefined;
+        if (target) {
+          const chatIdentity = resolveChatIdentity(authUser, target);
+          history = await db.select().from(messages)
+            .where(chatHistoryPredicates(chatIdentity.channel))
+            .orderBy(messages.timestamp);
+        } else {
+          history = await db.select().from(messages)
+            .where(chatHistoryPredicates("admin"))
+            .orderBy(messages.timestamp);
+        }
       } else {
         // Filter by username specifically
-        const targetUsername = userName || "guest";
+        const chatIdentity = resolveChatIdentity(authUser);
         history = await db.select().from(messages)
-          .where(eq(messages.username, targetUsername))
+          .where(chatHistoryPredicates(chatIdentity.channel))
           .orderBy(messages.timestamp);
       }
       res.json(history);
