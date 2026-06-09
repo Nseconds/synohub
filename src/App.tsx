@@ -776,8 +776,7 @@ export default function App() {
   ].filter(item => {
     if (!user) return false;
     if (user.role === "guest") {
-      // Guests are restricted to task submission and secure interaction flows
-      return item.id === "new-form" || item.id === "ai";
+      return item.id === "new-form" || item.id === "existing-form" || item.id === "ai";
     }
     return true;
   });
@@ -2116,11 +2115,11 @@ export default function App() {
                   {/* Operational Target Status Banner */}
                   <div className="mb-4">
                     {selectedLeadId ? (
-                      user?.role === "staff" ? (
+                      user?.role !== "admin" ? (
                         <div className="bg-rose-50 border border-rose-200/50 rounded-xl p-3 flex items-center justify-between text-[11px] text-rose-800">
                           <div className="flex items-center gap-2">
                             <span className="flex h-2 w-2 rounded-full bg-rose-500 animate-pulse" />
-                            <span>🔒 <strong>Read-Only Mode:</strong> Staff Coordinators can view their assigned lead <strong>ID #{selectedLeadId} ({leadForm.customerName})</strong>, but edited submissions are restricted.</span>
+                            <span>🔒 <strong>Read-Only Mode:</strong> You can view this authorized lead <strong>ID #{selectedLeadId} ({leadForm.customerName})</strong>, but edited submissions are restricted.</span>
                           </div>
                           <button type="button" onClick={resetLeadForm} className="font-bold underline uppercase tracking-tighter text-[9px] hover:text-rose-900">Switch to Create New</button>
                         </div>
@@ -2142,7 +2141,7 @@ export default function App() {
                   </div>
 
                   <form onSubmit={handleLeadSubmit} className="space-y-4">
-                    <fieldset disabled={user?.role === "staff" && !!selectedLeadId} className="space-y-4 w-full border-none p-0 m-0">
+                    <fieldset disabled={user?.role !== "admin" && !!selectedLeadId} className="space-y-4 w-full border-none p-0 m-0">
                     {/* Row 1: Source, Region, Status, Imp Type, Price, Proj Value */}
                     <div className="grid grid-cols-6 gap-4">
                       <div className="space-y-1">
@@ -2359,10 +2358,10 @@ export default function App() {
                       </button>
                       <button 
                         type="submit" 
-                        disabled={user?.role === "staff" && !!selectedLeadId}
+                        disabled={user?.role !== "admin" && !!selectedLeadId}
                         className="bg-teal-accent disabled:bg-zinc-300 disabled:text-zinc-500 disabled:cursor-not-allowed text-white px-10 py-2 rounded font-bold text-[10px] uppercase tracking-widest shadow-lg shadow-teal-accent/10 hover:opacity-95 disabled:shadow-none transition-all cursor-pointer"
                       >
-                        {user?.role === "staff" && !!selectedLeadId ? "READ ONLY" : "SAVE"}
+                        {user?.role !== "admin" && !!selectedLeadId ? "READ ONLY" : "SAVE"}
                       </button>
                     </div>
                   </form>
@@ -2465,7 +2464,7 @@ export default function App() {
             
             <form onSubmit={async (e) => {
               e.preventDefault();
-              if (user?.role === "staff") return;
+              if (user?.role !== "admin") return;
               try {
                 if (editingItem.type === 'lead') {
                   await axios.put(`/api/leads/${editingItem.data.id}`, editingItem.data);
@@ -2480,7 +2479,7 @@ export default function App() {
                 alert("Failed to update: " + err.message);
               }
             }} className="p-6 overflow-y-auto space-y-4 text-xs">
-              <fieldset disabled={user?.role === "staff"} className="space-y-4 w-full border-none p-0 m-0">
+              <fieldset disabled={user?.role !== "admin"} className="space-y-4 w-full border-none p-0 m-0">
               
               {editingItem.type === 'lead' && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2610,10 +2609,10 @@ export default function App() {
                 <button type="button" onClick={() => setEditingItem(null)} className="px-4 py-2 border border-zinc-200 rounded-lg text-zinc-500 font-bold text-[10px] uppercase hover:bg-zinc-50">Cancel</button>
                 <button 
                   type="submit" 
-                  disabled={user?.role === "staff"}
+                  disabled={user?.role !== "admin"}
                   className="px-6 py-2 bg-teal-accent disabled:bg-zinc-300 disabled:text-zinc-500 disabled:cursor-not-allowed disabled:shadow-none text-white rounded-lg font-bold text-[10px] uppercase hover:opacity-95 shadow-md shadow-teal-accent/10 whitespace-nowrap cursor-pointer"
                 >
-                  {user?.role === "staff" ? "Read Only" : "Save Changes"}
+                  {user?.role !== "admin" ? "Read Only" : "Save Changes"}
                 </button>
               </div>
             </form>
