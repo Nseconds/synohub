@@ -4,7 +4,7 @@ import { createServer as createHttpServer } from "http";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { db, pool } from "./src/db";
-import { customers, serviceRequests, messages } from "./src/db/schema";
+import { customers, serviceRequests, messages, salesplusEntries } from "./src/db/schema";
 import { eq, like, or, desc, and } from "drizzle-orm";
 import axios from "axios";
 import crypto from "crypto";
@@ -329,6 +329,57 @@ async function initDB() {
       )
     `);
 
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS salesplus_entries (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        synohub_request_id INT,
+        sales_plus_id INT DEFAULT 0,
+        sales_plus_date VARCHAR(20),
+        sales_plus_source VARCHAR(100),
+        sales_plus_region VARCHAR(100),
+        sales_plus_status VARCHAR(50),
+        sales_plus_implementation_type VARCHAR(100),
+        locator_plan VARCHAR(100),
+        sales_plus_price VARCHAR(100),
+        sales_plus_project_value VARCHAR(100),
+        sales_plus_company_name TEXT,
+        sales_plus_customer_name VARCHAR(255),
+        sales_plus_phone VARCHAR(50),
+        sales_plus_email VARCHAR(255),
+        sales_plus_designation VARCHAR(255),
+        sales_plus_address TEXT,
+        sales_plus_address_map TEXT,
+        sales_plus_address_coordinates VARCHAR(100),
+        sales_plus_person VARCHAR(50),
+        sales_plus_type VARCHAR(100),
+        sales_plus_quantity_new INT DEFAULT 0,
+        sales_plus_quantity_migrate INT DEFAULT 0,
+        sales_plus_quantity_trading INT DEFAULT 0,
+        sales_plus_quantity_service INT DEFAULT 0,
+        sales_plus_quantity_others INT DEFAULT 0,
+        sales_plus_supplier VARCHAR(255),
+        sales_plus_accessories TEXT,
+        sales_plus_comment TEXT,
+        sales_plus_requested_by VARCHAR(50),
+        schedule_note TEXT,
+        schedule_phone VARCHAR(50),
+        priority VARCHAR(50),
+        clientName TEXT,
+        itcUsername VARCHAR(255),
+        itcPassword VARCHAR(255),
+        projectImplementationType VARCHAR(100),
+        leadType VARCHAR(100),
+        tradeNumber VARCHAR(100),
+        notes TEXT,
+        create_new_nob INT DEFAULT 0,
+        existing_customer INT DEFAULT 0,
+        customer_id INT DEFAULT 0,
+        additional_contact_details TEXT,
+        synohub_requested_person VARCHAR(100),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     try {
       await pool.execute(`ALTER TABLE messages ADD COLUMN username VARCHAR(255) DEFAULT 'guest'`);
       console.log("Database table 'messages' verified with 'username' column.");
@@ -415,6 +466,96 @@ function mapInputToSchema(input: any): any {
   assignIfDefined("createdAt", "createdAt", "created_at");
 
   return schema;
+}
+
+function parseIntSafe(value: any, fallback = 0): number {
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeSalesplusStatus(status: any): string {
+  const raw = String(status || "New").trim();
+  if (!raw || raw.toLowerCase() === "new lead") return "New";
+  return raw;
+}
+
+function lookupSalesplusStaffId(name: any): string {
+  const staffName = String(name || "").trim();
+  if (!staffName) return "0";
+  try {
+    const configured = process.env.SALESPLUS_STAFF_IDS ? JSON.parse(process.env.SALESPLUS_STAFF_IDS) : {};
+    const match = Object.entries(configured).find(([key]) => key.toLowerCase() === staffName.toLowerCase());
+    if (match) return String(match[1]);
+  } catch {
+    console.warn("SALESPLUS_STAFF_IDS must be valid JSON, for example {\"Athul\":\"5\"}.");
+  }
+  return "0";
+}
+
+function buildSalesplusEntry(input: any, synohubRequestId: number, requestedPerson: string) {
+  const status = normalizeSalesplusStatus(input.status || input.sales_plus_status);
+  const implementationType = input.implementationType || input.implementation_type || input.sales_plus_implementation_type || "";
+  const salesType = input.salesType || input.sales_type || input.sales_plus_type || "New";
+  const companyName = input.customerName || input.customer_name || input.sales_plus_company_name || "";
+  const contactName = input.contactName || input.contact_name || input.sales_plus_customer_name || companyName;
+  const comment = input.comment || input.sales_plus_comment || "";
+  const phone = input.phone || input.sales_plus_phone || "";
+  const staffId = lookupSalesplusStaffId(requestedPerson || input.requestedPerson || input.requested_person);
+  const isWon = status.toLowerCase() === "won";
+  const isExisting = salesType.toLowerCase() === "existing";
+
+  return {
+    synohubRequestId,
+    salesPlusId: parseIntSafe(input.sales_plus_id, 0),
+    salesPlusDate: input.sales_plus_date || input.createdAt || new Date().toISOString().substring(0, 10),
+    salesPlusSource: input.source || input.sales_plus_source || "Company Lead",
+    salesPlusRegion: input.region || input.sales_plus_region || "",
+    salesPlusStatus: status,
+    salesPlusImplementationType: implementationType,
+    locatorPlan: input.locatorPlan || input.locator_plan || "",
+    salesPlusPrice: input.priceDetails || input.price_details || input.sales_plus_price || "",
+    salesPlusProjectValue: input.projectValue || input.project_value || input.sales_plus_project_value || "",
+    salesPlusCompanyName: companyName,
+    salesPlusCustomerName: contactName,
+    salesPlusPhone: phone,
+    salesPlusEmail: input.email || input.sales_plus_email || "",
+    salesPlusDesignation: input.designation || input.sales_plus_designation || "",
+    salesPlusAddress: input.address || input.sales_plus_address || "",
+    salesPlusAddressMap: input.mapLink || input.map_link || input.sales_plus_address_map || "",
+    salesPlusAddressCoordinates: input.coordinates || input.sales_plus_address_coordinates || "",
+    salesPlusPerson: staffId,
+    salesPlusType: salesType,
+    salesPlusQuantityNew: parseIntSafe(input.newQty || input.new_qty || input.sales_plus_quantity_new, 0),
+    salesPlusQuantityMigrate: parseIntSafe(input.migrateQty || input.migrate_qty || input.sales_plus_quantity_migrate, 0),
+    salesPlusQuantityTrading: parseIntSafe(input.tradingQty || input.trading_qty || input.sales_plus_quantity_trading, 0),
+    salesPlusQuantityService: parseIntSafe(input.serviceQty || input.service_qty || input.sales_plus_quantity_service, 0),
+    salesPlusQuantityOthers: parseIntSafe(input.otherQty || input.other_qty || input.sales_plus_quantity_others, 0),
+    salesPlusSupplier: input.supplier || input.sales_plus_supplier || "",
+    salesPlusAccessories: input.accessories || input.sales_plus_accessories || "",
+    salesPlusComment: comment,
+    salesPlusRequestedBy: staffId,
+    scheduleNote: input.schedule_note || comment,
+    schedulePhone: input.schedule_phone || phone,
+    priority: input.priority || "normal",
+    clientName: input.clientName || companyName,
+    itcUsername: input.itcUsername || "",
+    itcPassword: input.itcPassword || "",
+    projectImplementationType: input.projectImplementationType || implementationType,
+    leadType: input.leadType || salesType,
+    tradeNumber: input.tradeNumber || "",
+    notes: input.notes || comment,
+    createNewNob: isWon ? 1 : 0,
+    existingCustomer: isExisting ? 1 : 0,
+    customerId: parseIntSafe(input.customer_id || input.customerId, 0),
+    additionalContactDetails: input.additional_contact_details || input.additionalContactDetails || "[]",
+    synohubRequestedPerson: requestedPerson || "",
+  };
+}
+
+async function saveLocalSalesplusEntry(input: any, synohubRequestId: number, requestedPerson: string) {
+  const entry = buildSalesplusEntry(input, synohubRequestId, requestedPerson);
+  await db.insert(salesplusEntries).values(entry);
+  console.log(`[Salesplus Local] Saved mapped entry for SynoHub request #${synohubRequestId}.`);
 }
 
 async function handleAIRecordSave(reply: string, userRole: string = "guest", userName: string = ""): Promise<{ reply: string; savedRecord?: any }> {
@@ -576,6 +717,12 @@ async function handleAIRecordSave(reply: string, userRole: string = "guest", use
         otherQty: mapped.otherQty || 0,
         createdBy: userName || 'guest'
       });
+
+      try {
+        await saveLocalSalesplusEntry(mapped, res.insertId, mapped.requestedPerson || "");
+      } catch (salesplusErr) {
+        console.error("Failed to save local Salesplus entry:", salesplusErr);
+      }
 
       // Synchronize registration customer to customers table
       try {
@@ -861,6 +1008,12 @@ async function startServer() {
         createdAt: new Date().toISOString().substring(0, 10),
         createdBy: userName || 'guest'
       });
+
+      try {
+        await saveLocalSalesplusEntry({ ...body, requestedPerson: reqPerson }, result.insertId, reqPerson);
+      } catch (salesplusErr) {
+        console.error("Failed to save local Salesplus entry:", salesplusErr);
+      }
 
       // Synchronize lead customer to customers table
       try {
