@@ -32,7 +32,15 @@ import {
 } from "../ai/providers/gptOss";
 import { runGeminiChatCompletion } from "../ai/providers/gemini";
 import { runLocalOllamaChatCompletion } from "../ai/providers/localOllama";
+import { buildChatSystemInstruction } from "../ai/prompts/buildPrompt";
 import { buildLocalLlmSystemInstruction, loadPrompts } from "../ai/prompts/promptLoader";
+import { extractRecordTriggerJson, findRecordTrigger, removeRecordTrigger } from "../ai/saveRecordParser";
+import {
+  normalizeCompareProviders,
+  normalizeQueryAiMode,
+  type QueryProviderName,
+} from "../ai/aiRouter";
+import { formatActionIntentAnswer } from "../ai/queryResponseFormatter";
 import {
   applyStaffRequestedPersonDefault,
   cleanLocalChatReply,
@@ -40,6 +48,8 @@ import {
   formatCompareChatReply,
   getModeScopedChatChannel,
   sanitizeProviderChatHistory,
+} from "../ai/responseFormatter";
+import {
   type SafeQueryAiMode,
 } from "../ai/chatService";
 
@@ -432,8 +442,6 @@ interface DetectedQueryIntent {
   params: Record<string, any>;
   confidence: number;
 }
-
-type QueryProviderName = "gemini" | "local" | "nvidia" | "openrouter";
 
 interface QueryProviderResult {
   intent?: SafeQueryIntent;
@@ -1399,32 +1407,6 @@ function parseProviderIntent(raw: string): DetectedQueryIntent {
   };
 }
 
-function normalizeQueryAiMode(value: unknown, authUser: AuthUser): SafeQueryAiMode {
-  const raw = String(value || process.env.SAFE_QUERY_AI_MODE || "local").toLowerCase();
-  if (raw === "extra" || raw === "gemma" || raw === "cohere") return "openrouter";
-  return raw === "gemini" || raw === "compare" || raw === "local" || raw === "nvidia" || raw === "openrouter" ? raw : "local";
-}
-
-function normalizeProviderName(value: unknown): QueryProviderName | null {
-  const raw = String(value || "").toLowerCase().trim();
-  if (raw === "gemini" || raw === "local" || raw === "nvidia") return raw;
-  if (raw === "openrouter" || raw === "extra" || raw === "gemma" || raw === "cohere") return "openrouter";
-  return null;
-}
-
-function normalizeCompareProviders(value: unknown): QueryProviderName[] {
-  const rawItems = Array.isArray(value)
-    ? value
-    : typeof value === "string"
-      ? value.split(",")
-      : ["gemini", "local"];
-  const providers = rawItems
-    .map(normalizeProviderName)
-    .filter((provider): provider is QueryProviderName => Boolean(provider));
-  const unique = Array.from(new Set(providers)).slice(0, 4);
-  return unique.length > 0 ? unique : ["gemini", "local"];
-}
-
 function getProviderLabel(provider: QueryProviderName): string {
   if (provider === "gemini") return "Gemini";
   if (provider === "local") return "Local LLM";
@@ -1434,6 +1416,10 @@ function getProviderLabel(provider: QueryProviderName): string {
 
 function isOpenRouterPolicyEndpointError(error: string): boolean {
   return /No endpoints available matching your guardrail restrictions and data policy|settings\/privacy|status 404/i.test(String(error || ""));
+}
+
+function isOpenRouterTemporaryAvailabilityError(error: string): boolean {
+  return /status 429|Provider returned error|rate.?limit|thrott/i.test(String(error || ""));
 }
 
 function formatProviderError(provider: QueryProviderName, error: string): string {
@@ -1446,7 +1432,7 @@ function formatProviderError(provider: QueryProviderName, error: string): string
       "Use Gemini, Local LLM, or Cohere, or change OpenRouter privacy settings/model.",
     ].join("\n");
   }
-  if (provider === "nvidia" && /status 429|Provider returned error|rate.?limit|thrott/i.test(raw)) {
+  if (provider === "nvidia" && isOpenRouterTemporaryAvailabilityError(raw)) {
     return [
       `${openRouterPrimaryLabel} is currently throttled or temporarily unavailable through OpenRouter.`,
       `Configured model: ${openRouterModel}`,
@@ -2597,34 +2583,6 @@ function cleanDuplicateCustomerLabel(value: unknown): string {
     .trim();
 }
 
-function formatActionIntentAnswer(intent: SafeQueryIntent, params: Record<string, any>): string {
-  const labels: Record<string, string> = {
-    assignTicket: "assign a ticket",
-    reassignTicket: "reassign a ticket",
-    updateTicketStatus: "update a ticket status",
-    deleteTicket: "delete a ticket",
-    cancelTicket: "cancel a ticket",
-    createLead: "create a lead",
-    createServiceRequest: "create a service request",
-    createMigrationTicket: "create a migration ticket",
-    createInstallationTicket: "create an installation ticket",
-  };
-  const details = Object.entries(params)
-    .filter(([, value]) => value !== undefined && value !== null && value !== "")
-    .map(([key, value]) => `- ${key}: ${value}`);
-
-  return [
-    `Detected action intent: ${intent}`,
-    "",
-    `Direct Answer: I classified this as a request to ${labels[intent] || "perform a ticket action"}.`,
-    "",
-    "Execution: No database changes were made. The /api/chat/query endpoint is read-only and records action intents for evaluation only.",
-    ...(details.length ? ["", "Extracted Parameters:", ...details] : []),
-    "",
-    "Next Step: Use the authenticated chat workflow or admin UI action to execute this change with confirmation.",
-  ].join("\n");
-}
-
 function formatQueryAnswer(
   intent: SafeQueryIntent,
   params: Record<string, any>,
@@ -3168,7 +3126,7 @@ async function saveForcedServiceRequestFromMessage(input: string, authUser: Auth
 
 async function handleAIRecordSave(reply: string, userRole: string = "guest", userName: string = ""): Promise<{ reply: string; savedRecord?: any }> {
   // 1. Process [[DELETE_RECORD:...]]
-  const deleteMatch = reply.match(/\[{1,2}DELETE_RECORD:(.*?)\]{1,2}/s);
+  const deleteMatch = findRecordTrigger(reply, "DELETE_RECORD");
   if (deleteMatch) {
     try {
       if (userRole !== "admin") {
@@ -3179,33 +3137,28 @@ async function handleAIRecordSave(reply: string, userRole: string = "guest", use
           };
         }
         return {
-          reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(Authorization Warning: Access Denied. Only system administrators can delete records.)`
+          reply: removeRecordTrigger(reply, deleteMatch) + `\n\n(Authorization Warning: Access Denied. Only system administrators can delete records.)`
         };
       }
 
-      let rawJson = deleteMatch[1].trim();
-      const firstBrace = rawJson.indexOf("{");
-      const lastBrace = rawJson.lastIndexOf("}");
-      if (firstBrace !== -1 && lastBrace !== -1) {
-        rawJson = rawJson.substring(firstBrace, lastBrace + 1);
-      }
+      const rawJson = extractRecordTriggerJson(deleteMatch.body);
       const record = JSON.parse(rawJson);
       const id = parseInt(record.id);
       console.log(`[AI Auto-Delete] Detected record: ${record.type}, ID: ${id}`);
       if (record.type === "registration") {
         await db.delete(serviceRequests).where(eq(serviceRequests.id, id));
         return {
-          reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(CRM: Registration record #${id} deleted successfully by Admin.)`
+          reply: removeRecordTrigger(reply, deleteMatch) + `\n\n(CRM: Registration record #${id} deleted successfully by Admin.)`
         };
       } else if (record.type === "service") {
         await db.delete(serviceRequests).where(eq(serviceRequests.id, id));
         return {
-          reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(CRM: Service ticket record #${id} deleted successfully by Admin.)`
+          reply: removeRecordTrigger(reply, deleteMatch) + `\n\n(CRM: Service ticket record #${id} deleted successfully by Admin.)`
         };
       } else if (record.type === "customer") {
         await db.delete(customers).where(eq(customers.id, id));
         return {
-          reply: reply.replace(deleteMatch[0], "").trim() + `\n\n(CRM: Customer account record #${id} deleted successfully by Admin.)`
+          reply: removeRecordTrigger(reply, deleteMatch) + `\n\n(CRM: Customer account record #${id} deleted successfully by Admin.)`
         };
       }
     } catch (e) {
@@ -3214,21 +3167,16 @@ async function handleAIRecordSave(reply: string, userRole: string = "guest", use
   }
 
   // 2. Process [[UPDATE_RECORD:...]]
-  const updateMatch = reply.match(/\[{1,2}UPDATE_RECORD:(.*?)\]{1,2}/s);
+  const updateMatch = findRecordTrigger(reply, "UPDATE_RECORD");
   if (updateMatch) {
     try {
       if (userRole === "guest") {
         return {
-          reply: reply.replace(updateMatch[0], "").trim() + `\n\n(Authorization Warning: Access Denied. Public guest users cannot update records.)`
+          reply: removeRecordTrigger(reply, updateMatch) + `\n\n(Authorization Warning: Access Denied. Public guest users cannot update records.)`
         };
       }
 
-      let rawJson = updateMatch[1].trim();
-      const firstBrace = rawJson.indexOf("{");
-      const lastBrace = rawJson.lastIndexOf("}");
-      if (firstBrace !== -1 && lastBrace !== -1) {
-        rawJson = rawJson.substring(firstBrace, lastBrace + 1);
-      }
+      const rawJson = extractRecordTriggerJson(updateMatch.body);
       const record = JSON.parse(rawJson);
       const id = parseInt(record.id);
       console.log(`[AI Auto-Update] Detected record update: ${record.type}, ID: ${id}`);
@@ -3245,18 +3193,18 @@ async function handleAIRecordSave(reply: string, userRole: string = "guest", use
         const mappedData = mapInputToSchema(record.data);
         await db.update(serviceRequests).set(mappedData).where(eq(serviceRequests.id, id));
         return {
-          reply: reply.replace(updateMatch[0], "").trim() + `\n\n(CRM: Registration #${id} updated successfully.)`
+          reply: removeRecordTrigger(reply, updateMatch) + `\n\n(CRM: Registration #${id} updated successfully.)`
         };
       } else if (record.type === "service") {
         const mappedData = mapInputToSchema(record.data);
         await db.update(serviceRequests).set(mappedData).where(eq(serviceRequests.id, id));
         return {
-          reply: reply.replace(updateMatch[0], "").trim() + `\n\n(CRM: Service ticket #${id} updated successfully.)`
+          reply: removeRecordTrigger(reply, updateMatch) + `\n\n(CRM: Service ticket #${id} updated successfully.)`
         };
       } else if (record.type === "customer") {
         if (userRole !== "admin") {
           return {
-            reply: reply.replace(updateMatch[0], "").trim() + `\n\n(Authorization Warning: Access Denied. Only system administrators can edit customer accounts.)`
+            reply: removeRecordTrigger(reply, updateMatch) + `\n\n(Authorization Warning: Access Denied. Only system administrators can edit customer accounts.)`
           };
         }
         const mappedCustomer: any = {};
@@ -3270,7 +3218,7 @@ async function handleAIRecordSave(reply: string, userRole: string = "guest", use
         
         await db.update(customers).set(mappedCustomer).where(eq(customers.id, id));
         return {
-          reply: reply.replace(updateMatch[0], "").trim() + `\n\n(CRM: Customer account #${id} updated successfully.)`
+          reply: removeRecordTrigger(reply, updateMatch) + `\n\n(CRM: Customer account #${id} updated successfully.)`
         };
       }
     } catch (e) {
@@ -3279,16 +3227,11 @@ async function handleAIRecordSave(reply: string, userRole: string = "guest", use
   }
 
   // 3. Process [[SAVE_RECORD:...]]
-  const saveMatch = reply.match(/\[{1,2}SAVE_RECORD:(.*?)\]{1,2}/s);
+  const saveMatch = findRecordTrigger(reply, "SAVE_RECORD");
   if (!saveMatch) return { reply };
 
   try {
-    let rawJson = saveMatch[1].trim();
-    const firstBrace = rawJson.indexOf("{");
-    const lastBrace = rawJson.lastIndexOf("}");
-    if (firstBrace !== -1 && lastBrace !== -1) {
-      rawJson = rawJson.substring(firstBrace, lastBrace + 1);
-    }
+    const rawJson = extractRecordTriggerJson(saveMatch.body);
     const record = JSON.parse(rawJson);
     console.log(`[AI Auto-Save] Detected record save: ${record.type} by role=${userRole}`);
     
@@ -3345,7 +3288,7 @@ async function handleAIRecordSave(reply: string, userRole: string = "guest", use
       }
 
       return {
-        reply: reply.replace(saveMatch[0], "").trim() + `\n\n(CRM: Registration saved successfully. ID: ${res.insertId})`,
+        reply: removeRecordTrigger(reply, saveMatch) + `\n\n(CRM: Registration saved successfully. ID: ${res.insertId})`,
         savedRecord: { ...record, id: res.insertId }
       };
     } else if (record.type === "service") {
@@ -3367,15 +3310,15 @@ async function handleAIRecordSave(reply: string, userRole: string = "guest", use
         createdBy: userName || 'guest'
       });
       return {
-        reply: reply.replace(saveMatch[0], "").trim() + `\n\n(CRM: Service ticket ${ticketId} created successfully.)`,
+        reply: removeRecordTrigger(reply, saveMatch) + `\n\n(CRM: Service ticket ${ticketId} created successfully.)`,
         savedRecord: { ...record, id: res.insertId, ticketId }
       };
     }
-    return { reply: reply.replace(saveMatch[0], "").trim() };
+    return { reply: removeRecordTrigger(reply, saveMatch) };
   } catch (pErr) {
     console.error("Failed to parse or save AI record:", pErr);
     return {
-      reply: reply.replace(saveMatch[0], "").trim() + "\n\n(System: Failed to auto-save record. Please try manual entry.)"
+      reply: removeRecordTrigger(reply, saveMatch) + "\n\n(System: Failed to auto-save record. Please try manual entry.)"
     };
   }
 }
@@ -4374,85 +4317,12 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Customer: "${s.customerName}" | 
         console.error("Failed to load prompts dynamically, using in-memory defaults:", err);
       }
 
-      let systemInstruction = `${currentPrompts.chat_assistant}
-
-${dbContextStr}
-`;
-
-      if (userRole === "staff") {
-        systemInstruction += `
-=== STAFF SESSION IDENTITY ===
-- The logged-in staff user is "${userName}".
-- Treat "${userName}" as the active staff member, requester, requested person, and owner of this chat session.
-- If this staff user creates a lead registration or service ticket, default requestedPerson/requested_person/sales_person/assignee to "${userName}" unless the user explicitly names a different valid staff member.
-- Do NOT ask "who is the requested person" for staff users just because a new request starts. The requested person is already known from the login: "${userName}".
-- If the staff user asks for "pending request", "pending requests", "my pending", "open request", or similar, interpret it as a request to list/view their current pending/open records from CURRENT CRM DATABASE RECORDS. Do NOT treat that phrase as a request to create a new ticket.
-- If the staff user asks for "latest records", "latest 10 records", "recent records", or similar, list only records visible in CURRENT CRM DATABASE RECORDS for "${userName}".
-- Never invent sample/historical records and never mention records assigned to other staff members. If CURRENT CRM DATABASE RECORDS has no visible matches, say there are no visible records for "${userName}".
-- When listing records, only use records visible in CURRENT CRM DATABASE RECORDS and keep the answer concise with IDs, customer names, status, and description/location when available.
-`;
-      }
-
-      if (userRole === "guest") {
-        systemInstruction += `
-=== GUEST ROLE SECURITY CONSTRAINTS ===
-- You are interacting with a GUEST user (UserName: "${userName}").
-- GUEST users can create records, but they are STRICTLY RESTRICTED to viewing only records created by themselves.
-- Under NO circumstances can you show, describe, or summarize records of other users, technician workloads, or system-wide summaries.
-- If the guest user asks to view all records, all customers, all tickets, database summaries, technician workloads, or records created by other users (e.g. Athul), you MUST respond exactly with: "Access Restricted: You can only view records created by your account." and then list only the records that are present in CURRENT CRM DATABASE RECORDS (which have already been filtered to their own records).
-- Be polite, and keep the user's focus on creating new records or managing their own submitted items.
-`;
-      }
-
-      systemInstruction += `
-CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
-1. ACT HUMAN & OPERATIONAL: Reply like a human sales or fleets officer in Dubai of Synosys Fleet Intelligence. Keep conversations natural, friendly, highly custom, and warm. Use phrases like "Oh, let me look that up!", "Great, Vishnu!", or "Welcome back."
-2. DYNAMIC LOOKUP, MATCH CLARIFICATION & NEW CUSTOMER CHECK (CRITICAL):
-   - When a user enters a customer or company name (such as "klee", "kleemol", "crescent", "clymate"), check the lists of active CRM Customers, Lead Registrations, and Services in the CURRENT CRM DATABASE RECORDS above.
-   - If the name provided is only a partial match (e.g. they entered "klee" or "kleemol" which might match "KLEEMOL CAR RENTAL", or any abbreviation or partial spelling), you MUST NOT immediately assume they mean that existing customer. You MUST explicitly ask a clarification or confirmation question to find out if they are referring to that existing entity, or if this is a completely brand-new customer with a similar name.
-   - If there are MULTIPLE similar/matching records in the database (e.g. searching for "Clymate" or "Clymet" matches Clymate Logistics, Clymate Technical Services, Clymate Transport, etc., or multiple branches of Inspirentals), STOP immediately. Do NOT register or default to a single choice, and do NOT output a SAVE block yet.
-   - You MUST dynamically parse the active database context, list the ACTUAL matching records clearly with their details (database ID, customer name, region, and location if available), and ask the user to clarify which specific search result they mean, or if they are registering a brand-new entity entirely.
-   - Example format you should use for listing live matches:
-     "I searched our database and found a few active accounts matching 'Clymate'. Could you please clarify which of these accounts you are asking about, or if we should register a brand-new entity?
-     - Clymate Logistics (ID: #1001, Region: Dubai, Location: DIP)
-     - Clymate Logistics (ID: #1002, Region: Abu Dhabi, Location: KIZAD)
-     - Clymate Technical Services (ID: #1003, Region: Abu Dhabi, Location: Musaffah)
-     - Clymate Transport (ID: #1004, Region: Dubai, Location: Al Quoz)"
-   - Always list the REAL matching records found in CURRENT CRM DATABASE RECORDS. Do not invent simulated entries if they are not in the context string.
-3. MANDATORY ALIGNED KEY-VALUE DISPLAY FORMAT:
-   - When representing, summarizing, displaying, or confirming any Lead Registration or Service Ticket record (whether creating or updating), you MUST output exactly this aligned block format:
-     Service Type       : [Service / Implementation Type here, e.g. LOCATOR]
-     Customer Name      : [Contact Name here] | [Customer Name here]
-     Contact Number     : [Phone number here]
-     Quantity           : [Quantity of devices here, e.g. 1]
-     Payment            : [PAID/Pending/Not Applicable here]
-     Amount             : [Amount here if any]
-     Location           : [Location/Region here, e.g. Abu Dhabi]
-     Description        : [Description of issue here, e.g. No Connection]
-4. CONVERSATIONAL FILLING & STEP-BY-STEP INFORMATION GATHERING:
-   - Real humans type in fragments. If they request to file, create, save, or register something but essential details (specifically: contact phone number, location region, device quantity, status, or implementation type) are missing, do NOT output a trigger tag.
-   - Instead, reply instantly with human warmth and ask for the missing details step-by-step.
-   - Phrases like "pending request", "pending requests", "my pending", and "open request" are lookup/listing intents, not creation intents. Search CURRENT CRM DATABASE RECORDS and answer with matching visible records.
-5. TRIGGER SAVE FORMAT:
-   When you do have sufficient details (such as customer name, contact phone, region, status: "New Lead", salesType: "New" or "Existing", and quantity), output your friendly reply followed by the TRIGGER BLOCK at the very end. The trigger block MUST use exactly this format:
-   [[SAVE_RECORD:{"type":"registration","customerName":"...","contactName":"...","phone":"...","email":"...","region":"...","implementationType":"...","status":"New Lead","salesType":"Existing","requestedPerson":"...","comment":"...","qty":1}]]
-   OR if it is a service ticket save:
-   [[SAVE_RECORD:{"type":"service","customerName":"...","description":"...","assignee":"...","amount":"...","payment":"..."}]]
- 6. DYNAMIC STAFF REGISTRATION, INTRODUCTIONS & NAME ANOMALIES (CRITICAL):
-   - Under no circumstances should you treat a name introduction (such as "iam feros", "iaam sharnag", "i am athul", "this is nishad", etc.) as a standard generic greetings chat (do NOT reply with a basic "Hello Feros! How can I assist you today?" or default chatbot intro).
-   - If the user introduces themselves with a name that is not in the original staff list (e.g., "feros" or "sharnag"), you must recognize that they are registering a brand-new staff coordinator. Acknowledge them warmly as a newly registered fleet coordinator in Dubai, but let them know registration requires confirmation from their side (which is prompted in the user interface), and once confirmed, all subsequent requests/drafts in this session will default to them as the Requested Person.
-   - ABSOLUTE PROHIBITION ON ASSIGNING UNREGISTERED STAFF AS REQUESTED PERSON: You are strictly forbidden from assigning, defaulting, mapping, or adding any person as the Requested Person if they are not in the active requested person list (the list of default allowed staff or dynamically registered and confirmed staff). Under no circumstances should you say "The requested person for this registration is you" or similar phrases for unregistered/unauthorized people (who are not in the requested handoff list). If the user asks "who are the requested person" or similar, you must list the allowed registered staff members from the allowed list: Ajmal, Amrutha, Athul, Celine, Deepak, Faizal, Ivy, Midhun, Mohamed Musthafa, Naseeb, Nishad, Rasick, Reyn, Shamnad, Shams, Shyamjith, or any dynamically confirmed and registered staff in the session.
-   - If you asked who the requested person is, and they answer with any name (even if misspelled, new, or absent from the default list, such as "sharnag" or "feros"), you MUST accept it instantly without apologizing or asking for a retry. Do NOT say you don't recognize the name or ask them to choose again. Accept it as a newly registered staff member/coordinator, output a success confirmation, complete the draft record by mapping that name strictly to "requested_person", display the completed record in the aligned key-value format, and output the corresponding [[SAVE_RECORD:...]] block.
-7. SINGLE STAFF NAME ANSWERS CONTEXT PRESERVATION (CRITICAL):
-   - Under no circumstances should you treat a single staff member's name (e.g. "Athul", "Celine", "Nishad", "Midhun", "Faizal", "Rasick", "Shamnad", etc.) as a generic greeting or introduction (e.g. do NOT say "Hello Athul! How can I assist you today?" or "Nice to meet you").
-   - If you asked the user to specify who requested the ticket/lead (the staff/Requested Person), and they reply with a name from the allowed staff list (such as "athul"), you MUST recognize that they are providing the requested_person or sales_person for the CRM ticket or registration currently being drafted in the chat history.
-   - Do NOT reset the conversation or lose context. Proceed immediately to complete the draft ticket or lead registration, map the provided name to "requested_person", display the finalized ticket details in the mandatory aligned key-value format block (with unbolded text, i.e., NO double asterisks "**"), and append the complete corresponding [[SAVE_RECORD:...]] block.
-8. NEW SESSION/REQUEST STAFF NAME CLARIFICATION (EXPLICIT SESSIONS OVER COLD CARRIES):
-   - When a new chat message arrives initiating a separate request, or when a user begins a completely new service ticket or lead registration task, you MUST NOT implicitly carry over the 'Requested Person' from a previous conversation task or from history for admin or guest users.
-   - For example, if a previous service ticket was requested by "Athul", and now the user has started a new request (e.g., "create a service for customer crescent tomorrow"), do NOT default or assume that the requested person is "Athul" again.
-   - For STAFF users, this clarification rule is overridden by STAFF SESSION IDENTITY above: use the logged-in staff member as the Requested Person automatically.
-   - For admin or guest users only, explicitly ask who requested the ticket unless they provide the staff name within the prompt.
-`;
+      const systemInstruction = buildChatSystemInstruction({
+        prompts: currentPrompts,
+        dbContextStr,
+        userRole,
+        userName,
+      });
       const localSystemInstruction = buildLocalLlmSystemInstruction(systemInstruction);
 
       const sanitizedChatHistory = () => sanitizeProviderChatHistory(chatHistory);
@@ -4610,11 +4480,16 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
             durationMs: Date.now() - startTime,
           };
         } catch (providerErr) {
-          console.error(`${openRouterPrimaryLabel} API failed:`, (providerErr as Error).message);
+          const errorMessage = (providerErr as Error).message;
+          if (isOpenRouterTemporaryAvailabilityError(errorMessage)) {
+            console.warn(`${openRouterPrimaryLabel} is temporarily throttled through OpenRouter:`, errorMessage);
+          } else {
+            console.error(`${openRouterPrimaryLabel} API failed:`, errorMessage);
+          }
           return {
             reply: "",
             durationMs: Date.now() - startTime,
-            error: (providerErr as Error).message,
+            error: errorMessage,
           };
         }
       };
@@ -4630,11 +4505,16 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
         console.log(`[AI Chat] Mode=compare, running selected providers: ${compareProviders.join(", ")}.`);
         const compareResults = await Promise.all(compareProviders.map(async (provider) => {
           const result = await runSelectedChatProvider(provider);
-          if (provider === "nvidia" && result.error && isOpenRouterPolicyEndpointError(result.error)) {
-            console.warn(`${openRouterPrimaryLabel} is unavailable for this OpenRouter account/model policy in compare mode; using Local LLM fallback.`);
+          if (provider === "nvidia" && result.error && (isOpenRouterPolicyEndpointError(result.error) || isOpenRouterTemporaryAvailabilityError(result.error))) {
+            const fallbackReason = isOpenRouterPolicyEndpointError(result.error)
+              ? "current OpenRouter account/model policy"
+              : "temporary OpenRouter throttling";
+            console.warn(`${openRouterPrimaryLabel} is unavailable due to ${fallbackReason} in compare mode; using Local LLM fallback.`);
             const fallback = await runLocalChatReply(true);
             const fallbackNotice = [
-              `${openRouterPrimaryLabel} is unavailable for the current OpenRouter model/account policy.`,
+              isOpenRouterPolicyEndpointError(result.error)
+                ? `${openRouterPrimaryLabel} is unavailable for the current OpenRouter model/account policy.`
+                : `${openRouterPrimaryLabel} is currently throttled or temporarily unavailable through OpenRouter.`,
               `Configured model: ${openRouterModel}`,
               "Local LLM fallback result:",
               "",
