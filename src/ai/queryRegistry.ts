@@ -1,5 +1,5 @@
 import type { RowDataPacket } from "mysql2";
-import { pool } from "./src/db";
+import { pool } from "../db";
 
 export type SafeQueryRole = "admin" | "staff" | "guest";
 export type TicketStatusGroup = "pending" | "open" | "completed" | "latest";

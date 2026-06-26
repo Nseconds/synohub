@@ -6,3 +6,21 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Python cache
+__pycache__/
+*/__pycache__/
+*.pyc
+
+# Backups / archives
+*.zip
+
+# VSIX extensions
+*.vsix
+
+# Local reports / temp
+reports/
+test.py
+
+# Env
+.env
