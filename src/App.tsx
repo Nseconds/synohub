@@ -161,7 +161,48 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   timestamp?: string;
+  username?: string;
 }
+
+type SafeQueryAiMode = "gemini" | "local" | "compare" | "nvidia" | "openrouter";
+type CompareProvider = "gemini" | "local" | "nvidia" | "openrouter";
+
+const compareProviderOptions: Array<{ value: CompareProvider; label: string }> = [
+  { value: "gemini", label: "Gemini" },
+  { value: "local", label: "Local" },
+  { value: "nvidia", label: "GPT OSS 120B" },
+  { value: "openrouter", label: "Cohere" },
+];
+
+const normalizeQueryText = (text: string) => {
+  return text
+    .toLowerCase()
+    .replace(/\b(pednig|pendng|pendig|penidng|pendign|pendingg)\b/g, "pending")
+    .replace(/\b(reocrds|recrods|recods)\b/g, "records")
+    .replace(/\b(acount|accout|accoount)\b/g, "account");
+};
+
+const isSafeQueryMessage = (text: string) => {
+  const normalized = normalizeQueryText(text).trim();
+  if (/\b(update|assign|reassign|re-assign|cancel|delete|create|mark|change)\b/.test(normalized) || /^new\s+lead\b/.test(normalized)) return false;
+  if (/^(show|list|view)$/.test(normalized)) return true;
+  if (/\bpending\b/.test(normalized) && /\b(my|list|account|ticket|tickets|request|requests|lead|leads|queue)\b/.test(normalized)) return true;
+  if (/\b(pending|open|active|ongoing|unresolved)\b/.test(normalized) && !/\b(create|register|add|new|save|file)\b/.test(normalized)) return true;
+  if (/\b(migration|migrations|migrate)\b/.test(normalized) && /\b(show|list|view|get|find|how\s+many|count|total|ticket|tickets|request|requests|job|jobs|task|tasks|there)\b/.test(normalized)) return true;
+  if (/\b(find|show|view|get|search)\b/.test(normalized) && /\b(ticket|request)\b.*\b(id|number|#)?\s*\d+\b/.test(normalized)) return true;
+  if (/\b(need|needs|requiring|require|requires)\s+attention\b/.test(normalized) || /\battention\s+(ticket|tickets|request|requests|queue)\b/.test(normalized)) return true;
+  if (/\b(unassigned|free\s+today|available|overload|overloaded|balance|rebalance|workload\s+analysis)\b/.test(normalized)) return true;
+  if (/\b(customer\s+profile|customer\s+details|last\s+request|last\s+service|recent\s+activity|open\s+(tickets|jobs)|tickets\s+for|jobs\s+for)\b/.test(normalized)) return true;
+  if (/\b(no\s+connection|ignition|battery\s+low|battery\s+issues?|tracker\s+not\s+working|offline|sim\s+replacement|recurring\s+faults?|vehicle\s+history|device\s+history|migration\s+history|reinstallation|installation\s+history|common\s+issues?)\b/.test(normalized)) return true;
+  if (/\b(sla|alerts?|trend\s+analysis|queue\s+snapshot|operational\s+dashboard|service\s+statistics|full\s+overview|overall\s+fleet\s+status|recommended\s+actions|high\s+priority\s+customers)\b/.test(normalized)) return true;
+  if (/\b(customer|account|company)\b/.test(normalized) && /\b(exist|exists|available|registered|present|in\s+(?:our\s+)?database)\b/.test(normalized)) return true;
+  const mentionsStaff = REQUESTED_PEOPLE.some(name => new RegExp(`\\b${name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(normalized));
+  if (mentionsStaff && /\b(record|records|ticket|tickets|request|requests|lead|leads|job|jobs|task|tasks|workload|working\s+on|assigned)\b/.test(normalized)) return true;
+  if (/\b(total|count|how\s+many|overall)\b/.test(normalized) && /\b(record|records|ticket|tickets|request|requests|lead|leads|job|jobs|task|tasks|customer|customers|database|crm|system)\b/.test(normalized)) return true;
+  const hasQueryAction = /\b(show|list|view|find|get|search|latest|recent|last|pending|open|completed|closed|history|summary|workload|duplicate|highest|lowest|total|count|attention)\b/.test(normalized);
+  const hasQueryObject = /\b(ticket|tickets|request|requests|lead|leads|record|records|job|jobs|task|tasks|migration|migrations|migrate|customer|customers|account|company|staff|technician|region|status|dashboard|chat|messages|fleet|vehicle|vehicles|device|devices|issue|issues|fault|faults|phone|email|database|crm|system)\b/.test(normalized);
+  return hasQueryAction && hasQueryObject;
+};
 
 // --- Components ---
 
@@ -187,13 +228,45 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const activeChatScopeRef = useRef("");
+  const historyRequestRef = useRef(0);
   const [selectedChatTarget, setSelectedChatTarget] = useState("admin");
+  const [aiMode, setAiMode] = useState<SafeQueryAiMode>("local");
+  const [compareProviders, setCompareProviders] = useState<CompareProvider[]>(["gemini", "local"]);
   const isAdminViewingOtherChat = currentUser?.role === "admin" && selectedChatTarget !== "admin";
+  const chatScopeKey = `${userKey || ""}|${currentUser?.role || ""}|${selectedChatTarget}|${aiMode}`;
+
+  const getBaseChatChannel = (target: string) => {
+    if (!currentUser) return "";
+    if (currentUser.role === "admin") return target || "admin";
+    if (currentUser.role === "staff") return `staff:${currentUser.name.trim()}`;
+    return `guest:${currentUser.name.trim().toLowerCase()}`;
+  };
+
+  const getModeChatChannel = (mode: SafeQueryAiMode, target = selectedChatTarget) => {
+    return `${getBaseChatChannel(target)}|ai:${mode}`;
+  };
+
+  const filterModeMessages = (items: Message[], mode: SafeQueryAiMode, target: string) => {
+    const expectedChannel = getModeChatChannel(mode, target);
+    return items.filter(item => !item.username || item.username === expectedChannel);
+  };
+
+  const toggleCompareProvider = (provider: CompareProvider) => {
+    setCompareProviders(prev => {
+      if (prev.includes(provider)) {
+        const next = prev.filter(item => item !== provider);
+        return next.length > 0 ? next : prev;
+      }
+      return [...prev, provider];
+    });
+  };
 
   useEffect(() => {
+    activeChatScopeRef.current = chatScopeKey;
     setMessages([]);
-    fetchHistory();
-  }, [userKey, selectedChatTarget]);
+    fetchHistory(chatScopeKey, aiMode, selectedChatTarget, currentUser?.role);
+  }, [chatScopeKey, aiMode, selectedChatTarget, currentUser?.role]);
 
   useEffect(() => {
     if (currentUser?.role !== "admin") return;
@@ -213,13 +286,21 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
     }
   }, [messages]);
 
-  const fetchHistory = async () => {
+  const fetchHistory = async (
+    scopeKey: string,
+    mode: SafeQueryAiMode,
+    target: string,
+    role?: string,
+  ) => {
+    const requestId = historyRequestRef.current + 1;
+    historyRequestRef.current = requestId;
     try {
-      const url = currentUser?.role === "admin" 
-        ? `/api/chat/history?target=${encodeURIComponent(selectedChatTarget)}` 
-        : "/api/chat/history";
+      const url = role === "admin"
+        ? `/api/chat/history?target=${encodeURIComponent(target)}&aiMode=${encodeURIComponent(mode)}&_=${Date.now()}`
+        : `/api/chat/history?aiMode=${encodeURIComponent(mode)}&_=${Date.now()}`;
       const res = await axios.get(url);
-      setMessages(res.data);
+      if (historyRequestRef.current !== requestId || activeChatScopeRef.current !== scopeKey) return;
+      setMessages(filterModeMessages(Array.isArray(res.data) ? res.data : [], mode, target));
     } catch (e) {
       console.error("Failed to fetch chat history", e);
     }
@@ -229,9 +310,11 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
     if (isAdminViewingOtherChat) return;
     if (!input.trim() || loading) return;
     const userMsg = input;
+    const messageChannel = getModeChatChannel(aiMode, selectedChatTarget);
     setInput("");
-    setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
+    setMessages(prev => [...prev, { role: 'user', content: userMsg, username: messageChannel }]);
     setLoading(true);
+    const sendScopeKey = chatScopeKey;
 
     // Extract newly introduced staff name
     const introMatch = userMsg.match(/(?:i\s*a+m|i'm|ia+m|ia+am|my\s+name\s+is|this\s+is)\s+([a-zA-Z]{3,20})/i);
@@ -244,13 +327,17 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
     }
 
     try {
-      const history = messages.slice(-5).map(m => ({ role: m.role, content: m.content }));
-      const payload: any = { message: userMsg, history };
-      if (currentUser?.role === "admin") {
+      const useSafeQuery = isSafeQueryMessage(userMsg);
+      const payload: any = { message: userMsg, aiMode };
+      if (aiMode === "compare") {
+        payload.compareProviders = compareProviders;
+      }
+      if (!useSafeQuery && currentUser?.role === "admin") {
         payload.selectedChatTarget = selectedChatTarget;
       }
-      const res = await axios.post("/api/chat", payload);
-      setMessages(prev => [...prev, { role: 'assistant', content: res.data.reply }]);
+      const res = await axios.post(useSafeQuery ? "/api/chat/query" : "/api/chat", payload);
+      if (activeChatScopeRef.current !== sendScopeKey) return;
+      setMessages(prev => [...prev, { role: 'assistant', content: res.data.answer || res.data.reply, username: messageChannel }]);
       if (res.data.savedRecord) {
         if (onRecordSaved) {
           onRecordSaved(res.data.savedRecord);
@@ -262,7 +349,8 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
         }
       }
     } catch (e) {
-      setMessages(prev => [...prev, { role: 'assistant', content: "I'm experiencing high traffic. Please try again in 30s." }]);
+      if (activeChatScopeRef.current !== sendScopeKey) return;
+      setMessages(prev => [...prev, { role: 'assistant', content: "I'm experiencing high traffic. Please try again in 30s.", username: messageChannel }]);
     } finally {
       setLoading(false);
     }
@@ -271,8 +359,10 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
   const handlePresetClick = async (promptText: string) => {
     if (isAdminViewingOtherChat) return;
     if (loading) return;
-    setMessages(prev => [...prev, { role: 'user', content: promptText }]);
+    const messageChannel = getModeChatChannel(aiMode, selectedChatTarget);
+    setMessages(prev => [...prev, { role: 'user', content: promptText, username: messageChannel }]);
     setLoading(true);
+    const sendScopeKey = chatScopeKey;
 
     // Extract newly introduced staff name from preset click if any
     const introMatch = promptText.match(/(?:i\s*a+m|i'm|ia+m|ia+am|my\s+name\s+is|this\s+is)\s+([a-zA-Z]{3,20})/i);
@@ -285,13 +375,17 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
     }
 
     try {
-      const history = messages.slice(-5).map(m => ({ role: m.role, content: m.content }));
-      const payload: any = { message: promptText, history };
-      if (currentUser?.role === "admin") {
+      const useSafeQuery = isSafeQueryMessage(promptText);
+      const payload: any = { message: promptText, aiMode };
+      if (aiMode === "compare") {
+        payload.compareProviders = compareProviders;
+      }
+      if (!useSafeQuery && currentUser?.role === "admin") {
         payload.selectedChatTarget = selectedChatTarget;
       }
-      const res = await axios.post("/api/chat", payload);
-      setMessages(prev => [...prev, { role: 'assistant', content: res.data.reply }]);
+      const res = await axios.post(useSafeQuery ? "/api/chat/query" : "/api/chat", payload);
+      if (activeChatScopeRef.current !== sendScopeKey) return;
+      setMessages(prev => [...prev, { role: 'assistant', content: res.data.answer || res.data.reply, username: messageChannel }]);
       if (res.data.savedRecord) {
         if (onRecordSaved) {
           onRecordSaved(res.data.savedRecord);
@@ -303,7 +397,8 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
         }
       }
     } catch (e) {
-      setMessages(prev => [...prev, { role: 'assistant', content: "I'm experiencing high traffic. Please try again in 30s." }]);
+      if (activeChatScopeRef.current !== sendScopeKey) return;
+      setMessages(prev => [...prev, { role: 'assistant', content: "I'm experiencing high traffic. Please try again in 30s.", username: messageChannel }]);
     } finally {
       setLoading(false);
     }
@@ -328,39 +423,85 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
           </div>
         </div>
 
-        {/* Admin Dynamic Persona Selector */}
-        {currentUser?.role === "admin" && (
+        {/* Chat Controls */}
+        {currentUser && (
           <div className="px-6 py-3 bg-zinc-50 border-b border-zinc-200 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
             <div className="flex items-center gap-2 font-semibold text-zinc-700">
-              <Eye size={14} className="text-zinc-500" />
-              <span>Viewing chat: <span className="text-teal-accent font-bold">{getChatTargetLabel(selectedChatTarget)}</span></span>
-              {isAdminViewingOtherChat && (
-                <span className="ml-2 rounded border border-rose-200 bg-rose-50 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-rose-600">
-                  Read Only
-                </span>
+              {currentUser.role === "admin" ? (
+                <>
+                  <Eye size={14} className="text-zinc-500" />
+                  <span>Viewing chat: <span className="text-teal-accent font-bold">{getChatTargetLabel(selectedChatTarget)}</span></span>
+                  {isAdminViewingOtherChat && (
+                    <span className="ml-2 rounded border border-rose-200 bg-rose-50 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-rose-600">
+                      Read Only
+                    </span>
+                  )}
+                </>
+              ) : (
+                <>
+                  <Sparkles size={14} className="text-zinc-500" />
+                  <span>Signed in as: <span className="text-teal-accent font-bold">{currentUser.name}</span></span>
+                </>
               )}
             </div>
-            <div className="flex items-center gap-2">
-              <span className="text-zinc-500 font-medium">Chat as:</span>
-              <select
-                value={selectedChatTarget}
-                onChange={(e) => setSelectedChatTarget(e.target.value)}
-                className="bg-white border border-zinc-200 rounded px-2 py-1 text-xs text-zinc-800 focus:outline-none focus:border-teal-accent font-medium cursor-pointer"
-              >
-                <option value="admin">Admin</option>
-                <option value="guest">Guest</option>
-                {staffOptions.map((p) => (
-                  <option key={p} value={`staff:${p}`}>
-                    Staff: {p}
-                  </option>
-                ))}
-              </select>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2">
+                <Sparkles size={14} className="text-zinc-500" />
+                <span className="text-zinc-500 font-medium">AI Mode:</span>
+                <select
+                  value={aiMode}
+                  onChange={(e) => setAiMode(e.target.value as SafeQueryAiMode)}
+                  className="bg-white border border-zinc-200 rounded px-2 py-1 text-xs text-zinc-800 focus:outline-none focus:border-teal-accent font-medium cursor-pointer"
+                >
+                  <option value="gemini">Gemini</option>
+                  <option value="local">Local LLM</option>
+                  <option value="nvidia">GPT OSS 120B</option>
+                  <option value="openrouter">Cohere</option>
+                  <option value="compare">Compare Both</option>
+                </select>
+              </div>
+              {aiMode === "compare" && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {compareProviderOptions.map(option => (
+                    <label
+                      key={option.value}
+                      className="flex h-7 items-center gap-1.5 rounded border border-zinc-200 bg-white px-2 text-[10px] font-bold text-zinc-600"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={compareProviders.includes(option.value)}
+                        onChange={() => toggleCompareProvider(option.value)}
+                        className="h-3 w-3 accent-teal-accent"
+                      />
+                      {option.label}
+                    </label>
+                  ))}
+                </div>
+              )}
+              {currentUser.role === "admin" && (
+                <div className="flex items-center gap-2">
+                  <span className="text-zinc-500 font-medium">Chat as:</span>
+                  <select
+                    value={selectedChatTarget}
+                    onChange={(e) => setSelectedChatTarget(e.target.value)}
+                    className="bg-white border border-zinc-200 rounded px-2 py-1 text-xs text-zinc-800 focus:outline-none focus:border-teal-accent font-medium cursor-pointer"
+                  >
+                    <option value="admin">Admin</option>
+                    <option value="guest">Guest</option>
+                    {staffOptions.map((p) => (
+                      <option key={p} value={`staff:${p}`}>
+                        Staff: {p}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
           </div>
         )}
 
         {/* Messages */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-hide bg-zinc-50/30">
+        <div key={chatScopeKey} ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-hide bg-zinc-50/30">
           {messages.length === 0 && (
             <div className="h-full flex flex-col items-center justify-center text-zinc-400 text-center p-8 space-y-4">
                <MessageSquare size={44} className="opacity-15 text-teal-accent" />
