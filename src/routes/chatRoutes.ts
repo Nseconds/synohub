@@ -1,10 +1,10 @@
 import "dotenv/config";
-import express, { type NextFunction, type Request, type Response } from "express";
+import express from "express";
 import { createServer as createHttpServer } from "http";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { db, pool } from "../db";
-import { customers, serviceRequests, messages, salesplusEntries } from "../db/schema";
+import { customers, serviceRequests, messages } from "../db/schema";
 import { eq, like, or, desc, and } from "drizzle-orm";
 import axios from "axios";
 import crypto from "crypto";
@@ -14,22 +14,34 @@ import fs from "fs";
 
 import { GoogleGenAI } from "@google/genai";
 import queryRegistry, { applyRoleScope } from "../ai/queryRegistry";
-
-type UserRole = "admin" | "staff" | "guest";
-
-interface AuthUser {
-  sub: string;
-  name: string;
-  role: UserRole;
-  iat: number;
-  exp: number;
-}
-
-interface OpenRouterChatMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
-  reasoning_details?: unknown;
-}
+import { getAuthUser, requireAuth, requireRoles } from "../auth/middleware";
+import { issueToken } from "../auth/jwt";
+import { allowedStaff, normalizeUserName, staffRoster, type AuthUser, type UserRole } from "../auth/users";
+import { chatHistoryPredicates, resolveChatIdentity } from "../auth/permissions";
+import { parseIntSafe, saveLocalSalesplusEntry } from "../services/salesplusService";
+import {
+  saveForcedServiceRequestFields,
+  type ForcedServiceRequestFields,
+  type ForcedServiceRequestResult,
+} from "../services/serviceRequestService";
+import { syncLeadEditCustomer, syncRegistrationCustomer } from "../services/customerService";
+import { getChatMessagesByPredicate, getRecentChatMessages, saveChatMessage } from "../services/messageService";
+import {
+  runOpenRouterChatCompletion as runOpenRouterProviderChatCompletion,
+  type OpenRouterChatMessage,
+} from "../ai/providers/gptOss";
+import { runGeminiChatCompletion } from "../ai/providers/gemini";
+import { runLocalOllamaChatCompletion } from "../ai/providers/localOllama";
+import { buildLocalLlmSystemInstruction, loadPrompts } from "../ai/prompts/promptLoader";
+import {
+  applyStaffRequestedPersonDefault,
+  cleanLocalChatReply,
+  cleanVisibleAssistantText,
+  formatCompareChatReply,
+  getModeScopedChatChannel,
+  sanitizeProviderChatHistory,
+  type SafeQueryAiMode,
+} from "../ai/chatService";
 
 // Helper to safely strip surrounding quotation marks from environment variables
 function cleanEnvVar(val: string | undefined): string | null {
@@ -51,8 +63,6 @@ const extraLlmReasoning = String(process.env.OPENROUTER_COMPARE_REASONING || pro
 const geminiModel = cleanEnvVar(process.env.GEMINI_MODEL) || "gemini-3.5-flash";
 const openRouterPrimaryLabel = "GPT OSS 120B";
 const cloudProviderLabel = cleanedGeminiKey ? "Gemini" : openRouterPrimaryLabel;
-const openRouterReasoningMessages = new Map<string, Array<OpenRouterChatMessage>>();
-
 console.log("--- Environment Variable Sync Check ---");
 console.log("OLLAMA_URL:", process.env.OLLAMA_URL);
 console.log("OLLAMA_MODEL:", process.env.OLLAMA_MODEL);
@@ -79,71 +89,8 @@ if (cleanedGeminiKey) {
 }
 
 // Load prompts
-const promptsPath = path.join(process.cwd(), "prompts.json");
-const localLlmPromptPath = path.join(process.cwd(), "ai", "local-llm", "systemPrompt.txt");
-const localLlmExamplesPath = path.join(process.cwd(), "ai", "local-llm", "styleExamples.json");
-let prompts = {
-  chat_assistant: "You are a SynoHub Assistant for Synosys, a fleet management SaaS company in the UAE. Assist users with CRM queries, service tickets, and registrations.",
-  log_extractor: "You are a professional data extractor for Synosys Fleet CRM. Return ONLY a JSON array of extracted records."
-};
-
-try {
-  if (fs.existsSync(promptsPath)) {
-    const data = JSON.parse(fs.readFileSync(promptsPath, "utf8"));
-    prompts = { ...prompts, ...data };
-    console.log("Prompts loaded from prompts.json");
-  }
-} catch (err) {
-  console.error("Failed to load prompts.json, using defaults.");
-}
-
-function readLocalLlmPrompt(): string {
-  const fallback = [
-    "You are SynoHub AI Assistant for Synosys Fleet Intelligence in Dubai.",
-    "Answer as a concise fleet operations assistant, not a generic chatbot.",
-    "For greetings, mention SynoHub, service tickets, locator registrations, customer records, and technician assignments.",
-  ].join("\n");
-
-  try {
-    if (fs.existsSync(localLlmPromptPath)) {
-      const content = fs.readFileSync(localLlmPromptPath, "utf8").trim();
-      if (content) return content;
-    }
-  } catch (err) {
-    console.error("Failed to load local LLM system prompt, using fallback:", err);
-  }
-
-  return fallback;
-}
-
-function readLocalLlmExamples(): string {
-  try {
-    if (!fs.existsSync(localLlmExamplesPath)) return "";
-    const examples = JSON.parse(fs.readFileSync(localLlmExamplesPath, "utf8"));
-    if (!Array.isArray(examples)) return "";
-
-    const lines = examples
-      .filter((item: any) => item && typeof item.input === "string" && typeof item.output === "string")
-      .slice(0, 12)
-      .map((item: any, index: number) => `Example ${index + 1} input:\n${item.input}\n\nExample ${index + 1} good reply:\n${item.output}`);
-
-    return lines.length > 0
-      ? `\n\nLOCAL LLM STYLE EXAMPLES:\n${lines.join("\n\n")}`
-      : "";
-  } catch (err) {
-    console.error("Failed to load local LLM examples, continuing without examples:", err);
-    return "";
-  }
-}
-
-function buildLocalLlmSystemInstruction(sharedInstruction: string): string {
-  return [
-    sharedInstruction,
-    "\n\nFINAL LOCAL LLM RESPONSE STYLE OVERRIDE:",
-    readLocalLlmPrompt(),
-    readLocalLlmExamples(),
-  ].join("\n");
-}
+let prompts = loadPrompts();
+console.log("Prompts loaded from prompts.json");
 
 function extractTemplateField(input: string, labels: string[]): string {
   const templateFieldLabels = [
@@ -336,45 +283,6 @@ function formatGenericTicketCreationPrompt(userRole: string, userName: string): 
   return lines.join("\n");
 }
 
-function cleanVisibleAssistantText(text: string): string {
-  return String(text || "")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/\*([^*\n]+)\*/g, "$1")
-    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
-    .replace(/^\s*\*\s+/gm, "- ")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-interface ForcedServiceRequestFields {
-  customerName: string;
-  contactName: string;
-  phone: string;
-  email: string;
-  driverNumber: string;
-  implementationType: string;
-  vehiclePlate: string;
-  quantity: number;
-  issueDescription: string;
-  accessories: string;
-  location: string;
-  preferredDateTime: string;
-  requestedPerson: string;
-  amount: string;
-  paymentStatus: string;
-}
-
-interface ForcedServiceRequestResult {
-  answer: string;
-  customerMatched: boolean;
-  customerCreated: boolean;
-  customerId: number;
-  serviceRequestId: number;
-  salesplusSaved: boolean;
-  fields: ForcedServiceRequestFields;
-}
-
 function normalizeComparablePhone(value: string): string {
   return String(value || "").replace(/\D/g, "");
 }
@@ -447,181 +355,9 @@ function parseForcedServiceRequest(input: string): ForcedServiceRequestFields | 
   };
 }
 
-const staffRoster = [
-  "Ajmal", "Amrutha", "Athul", "Celine", "Deepak", "Faizal", "Ivy", "Midhun",
-  "Mohamed Musthafa", "Naseeb", "Nishad", "Rasick", "Reyn", "Shamnad", "Shams", "Shyamjith"
-];
-
-const allowedStaff = staffRoster.map(name => name.toLowerCase());
-const authSecret = cleanEnvVar(process.env.AUTH_SECRET || process.env.JWT_SECRET) || crypto.randomBytes(32).toString("hex");
 const configuredAdminPassword = cleanEnvVar(process.env.ADMIN_PASSWORD) || "admin";
 const configuredStaffPassword = cleanEnvVar(process.env.STAFF_PASSWORD) || "staff123";
 const devAdminPassword = null;
-
-if (!process.env.AUTH_SECRET && !process.env.JWT_SECRET) {
-  console.warn("AUTH_SECRET is not set. Tokens will be invalidated on every server restart.");
-}
-
-function base64Url(input: string | Buffer): string {
-  return Buffer.from(input).toString("base64url");
-}
-
-function signPayload(payload: string): string {
-  return crypto.createHmac("sha256", authSecret).update(payload).digest("base64url");
-}
-
-function issueToken(user: Pick<AuthUser, "sub" | "name" | "role">): string {
-  const now = Math.floor(Date.now() / 1000);
-  const payload: AuthUser = {
-    ...user,
-    iat: now,
-    exp: now + 60 * 60 * 12,
-  };
-  const encodedPayload = base64Url(JSON.stringify(payload));
-  return `${encodedPayload}.${signPayload(encodedPayload)}`;
-}
-
-function verifyToken(token: string | undefined): AuthUser | null {
-  if (!token || !token.includes(".")) return null;
-  const [encodedPayload, signature] = token.split(".");
-  if (!encodedPayload || !signature) return null;
-
-  const expectedSignature = signPayload(encodedPayload);
-  const signatureBuffer = Buffer.from(signature);
-  const expectedBuffer = Buffer.from(expectedSignature);
-  if (signatureBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as AuthUser;
-    if (!parsed.name || !parsed.role || !parsed.sub || !parsed.exp) return null;
-    if (!["admin", "staff", "guest"].includes(parsed.role)) return null;
-    if (parsed.exp < Math.floor(Date.now() / 1000)) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function getBearerToken(req: Request): string | undefined {
-  const header = req.headers.authorization || "";
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  return match?.[1];
-}
-
-function requireAuth(req: Request, res: Response, next: NextFunction) {
-  const user = verifyToken(getBearerToken(req));
-  if (!user) {
-    return res.status(401).json({ error: "Unauthorized. Please sign in again." });
-  }
-  (req as any).user = user;
-  return next();
-}
-
-function requireRoles(...roles: UserRole[]) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    const user = (req as any).user as AuthUser | undefined;
-    if (!user || !roles.includes(user.role)) {
-      return res.status(403).json({ error: "Forbidden. Your account does not have access to this action." });
-    }
-    return next();
-  };
-}
-
-function getAuthUser(req: Request): AuthUser {
-  return (req as any).user as AuthUser;
-}
-
-function normalizeUserName(name: string): string {
-  return name.trim().toLowerCase();
-}
-
-function resolveChatIdentity(authUser: AuthUser, requestedTarget?: unknown) {
-  const normalizedGuestName = normalizeUserName(authUser.name);
-  const fallback = {
-    role: authUser.role,
-    name: authUser.role === "guest" ? normalizedGuestName : authUser.name.trim(),
-    channel: authUser.role === "admin"
-      ? "admin"
-      : authUser.role === "staff"
-        ? `staff:${authUser.name.trim()}`
-        : `guest:${normalizedGuestName}`,
-  };
-
-  if (authUser.role !== "admin" || typeof requestedTarget !== "string") {
-    return fallback;
-  }
-
-  const target = requestedTarget.trim();
-  if (target === "admin") {
-    return { role: "admin" as const, name: authUser.name.trim(), channel: "admin" };
-  }
-
-  if (target === "guest") {
-    return { role: "guest" as const, name: "guest", channel: "guest" };
-  }
-
-  if (target.toLowerCase().startsWith("staff:")) {
-    const rawStaffName = target.slice("staff:".length).trim();
-    const matchedStaff = staffRoster.find(s => s.toLowerCase() === rawStaffName.toLowerCase());
-    const staffName = matchedStaff || rawStaffName;
-    if (staffName) {
-      return { role: "staff" as const, name: staffName, channel: `staff:${staffName}` };
-    }
-  }
-
-  return fallback;
-}
-
-function chatHistoryPredicates(channel: string) {
-  if (channel.includes("|ai:")) {
-    return eq(messages.username, channel);
-  }
-
-  const legacyModeChannels = [
-    `${channel}|ai:local`,
-    `${channel}|ai:gemini`,
-    `${channel}|ai:compare`,
-  ];
-
-  if (channel.startsWith("staff:")) {
-    const staffName = channel.slice("staff:".length);
-    return or(
-      eq(messages.username, channel),
-      eq(messages.username, staffName),
-      ...legacyModeChannels.map(legacyChannel => eq(messages.username, legacyChannel)),
-    );
-  }
-  if (channel === "admin") {
-    return or(
-      eq(messages.username, "admin"),
-      eq(messages.username, "Administrator"),
-      ...legacyModeChannels.map(legacyChannel => eq(messages.username, legacyChannel)),
-    );
-  }
-  if (channel === "guest") {
-    return or(
-      eq(messages.username, "guest"),
-      like(messages.username, "guest:%"),
-      ...legacyModeChannels.map(legacyChannel => eq(messages.username, legacyChannel)),
-    );
-  }
-  if (channel.startsWith("guest:")) {
-    return or(
-      eq(messages.username, channel),
-      ...legacyModeChannels.map(legacyChannel => eq(messages.username, legacyChannel)),
-    );
-  }
-  return or(
-    eq(messages.username, channel),
-    ...legacyModeChannels.map(legacyChannel => eq(messages.username, legacyChannel)),
-  );
-}
-
-function getModeScopedChatChannel(channel: string, aiMode: SafeQueryAiMode): string {
-  return `${channel}|ai:${aiMode}`;
-}
 
 function cleanRecordDescription(value: unknown): string {
   return String(value || "No description")
@@ -697,7 +433,6 @@ interface DetectedQueryIntent {
   confidence: number;
 }
 
-type SafeQueryAiMode = "gemini" | "local" | "compare" | "nvidia" | "openrouter";
 type QueryProviderName = "gemini" | "local" | "nvidia" | "openrouter";
 
 interface QueryProviderResult {
@@ -1730,64 +1465,12 @@ async function runOpenRouterChatCompletion(args: {
   reasoning?: boolean;
   reasoningStateKey?: string;
 }): Promise<string> {
-  if (!cleanedOpenRouterKey) {
-    throw new Error("OpenRouter provider is not configured on this server.");
-  }
-
-  const requestMessages = args.reasoning && args.reasoningStateKey
-    ? [
-        ...args.messages.filter(message => message.role === "system"),
-        ...(openRouterReasoningMessages.get(args.reasoningStateKey) || []),
-        ...args.messages.filter(message => message.role !== "system").slice(-1),
-      ]
-    : args.messages;
-
-  const response = await axios.post(`${openRouterBaseUrl.replace(/\/$/, "")}/chat/completions`, {
-    model: args.model || openRouterModel,
-    messages: requestMessages,
-    temperature: args.temperature ?? 0.2,
-    max_tokens: args.maxTokens ?? 1200,
-    stream: false,
-    ...(args.reasoning ? { reasoning: { enabled: true } } : {}),
-    ...(args.json ? { response_format: { type: "json_object" } } : {}),
-  }, {
-    timeout: 300000,
-    headers: {
-      Authorization: `Bearer ${cleanedOpenRouterKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": process.env.OPENROUTER_SITE_URL || "http://localhost:3000",
-      "X-Title": process.env.OPENROUTER_APP_NAME || "SynoHub",
-    },
-    validateStatus: () => true,
+  return runOpenRouterProviderChatCompletion({
+    ...args,
+    apiKey: cleanedOpenRouterKey,
+    baseUrl: openRouterBaseUrl,
+    defaultModel: openRouterModel,
   });
-
-  if (response.status < 200 || response.status >= 300) {
-    const message = response.data?.error?.message || response.data?.message || JSON.stringify(response.data);
-    throw new Error(`OpenRouter returned status ${response.status}: ${message}`);
-  }
-
-  const assistantMessage = response.data?.choices?.[0]?.message;
-  const content = assistantMessage?.content;
-  if (!content || typeof content !== "string") {
-    throw new Error("OpenRouter returned no text content.");
-  }
-
-  if (args.reasoning && args.reasoningStateKey) {
-    const prior = openRouterReasoningMessages.get(args.reasoningStateKey) || [];
-    const latestUser = requestMessages.filter(message => message.role === "user").slice(-1);
-    const nextMessages = [
-      ...prior,
-      ...latestUser,
-      {
-        role: "assistant" as const,
-        content,
-        reasoning_details: assistantMessage?.reasoning_details,
-      },
-    ].filter(message => message.content).slice(-8);
-    openRouterReasoningMessages.set(args.reasoningStateKey, nextMessages);
-  }
-
-  return content;
 }
 
 async function runLocalIntentProvider(message: string): Promise<QueryProviderResult> {
@@ -3477,255 +3160,10 @@ function mapInputToSchema(input: any): any {
   return schema;
 }
 
-function parseIntSafe(value: any, fallback = 0): number {
-  const parsed = parseInt(value, 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function normalizeSalesplusStatus(status: any): string {
-  const raw = String(status || "New").trim();
-  if (!raw || raw.toLowerCase() === "new lead") return "New";
-  return raw;
-}
-
-function lookupSalesplusStaffId(name: any): string {
-  const staffName = String(name || "").trim();
-  if (!staffName) return "0";
-  try {
-    const configured = process.env.SALESPLUS_STAFF_IDS ? JSON.parse(process.env.SALESPLUS_STAFF_IDS) : {};
-    const match = Object.entries(configured).find(([key]) => key.toLowerCase() === staffName.toLowerCase());
-    if (match) return String(match[1]);
-  } catch {
-    console.warn("SALESPLUS_STAFF_IDS must be valid JSON, for example {\"Athul\":\"5\"}.");
-  }
-  return "0";
-}
-
-function buildSalesplusEntry(input: any, synohubRequestId: number, requestedPerson: string) {
-  const status = normalizeSalesplusStatus(input.status || input.sales_plus_status);
-  const implementationType = input.implementationType || input.implementation_type || input.sales_plus_implementation_type || "";
-  const salesType = input.salesType || input.sales_type || input.sales_plus_type || "New";
-  const companyName = input.customerName || input.customer_name || input.sales_plus_company_name || "";
-  const contactName = input.contactName || input.contact_name || input.sales_plus_customer_name || companyName;
-  const comment = input.comment || input.sales_plus_comment || "";
-  const phone = input.phone || input.sales_plus_phone || "";
-  const staffId = lookupSalesplusStaffId(requestedPerson || input.requestedPerson || input.requested_person);
-  const isWon = status.toLowerCase() === "won";
-  const isExisting = salesType.toLowerCase() === "existing";
-
-  return {
-    synohubRequestId,
-    salesPlusId: parseIntSafe(input.sales_plus_id, 0),
-    salesPlusDate: input.sales_plus_date || input.createdAt || new Date().toISOString().substring(0, 10),
-    salesPlusSource: input.source || input.sales_plus_source || "Company Lead",
-    salesPlusRegion: input.region || input.sales_plus_region || "",
-    salesPlusStatus: status,
-    salesPlusImplementationType: implementationType,
-    locatorPlan: input.locatorPlan || input.locator_plan || "",
-    salesPlusPrice: input.priceDetails || input.price_details || input.sales_plus_price || "",
-    salesPlusProjectValue: input.projectValue || input.project_value || input.sales_plus_project_value || "",
-    salesPlusCompanyName: companyName,
-    salesPlusCustomerName: contactName,
-    salesPlusPhone: phone,
-    salesPlusEmail: input.email || input.sales_plus_email || "",
-    salesPlusDesignation: input.designation || input.sales_plus_designation || "",
-    salesPlusAddress: input.address || input.sales_plus_address || "",
-    salesPlusAddressMap: input.mapLink || input.map_link || input.sales_plus_address_map || "",
-    salesPlusAddressCoordinates: input.coordinates || input.sales_plus_address_coordinates || "",
-    salesPlusPerson: staffId,
-    salesPlusType: salesType,
-    salesPlusQuantityNew: parseIntSafe(input.newQty || input.new_qty || input.sales_plus_quantity_new, 0),
-    salesPlusQuantityMigrate: parseIntSafe(input.migrateQty || input.migrate_qty || input.sales_plus_quantity_migrate, 0),
-    salesPlusQuantityTrading: parseIntSafe(input.tradingQty || input.trading_qty || input.sales_plus_quantity_trading, 0),
-    salesPlusQuantityService: parseIntSafe(input.serviceQty || input.service_qty || input.sales_plus_quantity_service, 0),
-    salesPlusQuantityOthers: parseIntSafe(input.otherQty || input.other_qty || input.sales_plus_quantity_others, 0),
-    salesPlusSupplier: input.supplier || input.sales_plus_supplier || "",
-    salesPlusAccessories: input.accessories || input.sales_plus_accessories || "",
-    salesPlusComment: comment,
-    salesPlusRequestedBy: staffId,
-    scheduleNote: input.schedule_note || comment,
-    schedulePhone: input.schedule_phone || phone,
-    priority: input.priority || "normal",
-    clientName: input.clientName || companyName,
-    itcUsername: input.itcUsername || "",
-    itcPassword: input.itcPassword || "",
-    projectImplementationType: input.projectImplementationType || implementationType,
-    leadType: input.leadType || salesType,
-    tradeNumber: input.tradeNumber || "",
-    notes: input.notes || comment,
-    createNewNob: isWon ? 1 : 0,
-    existingCustomer: isExisting ? 1 : 0,
-    customerId: parseIntSafe(input.customer_id || input.customerId, 0),
-    additionalContactDetails: input.additional_contact_details || input.additionalContactDetails || "[]",
-    synohubRequestedPerson: requestedPerson || "",
-  };
-}
-
-async function saveLocalSalesplusEntry(input: any, synohubRequestId: number, requestedPerson: string) {
-  const entry = buildSalesplusEntry(input, synohubRequestId, requestedPerson);
-  await db.insert(salesplusEntries).values(entry);
-  console.log(`[Salesplus Local] Saved mapped entry for SynoHub request #${synohubRequestId}.`);
-}
-
-async function findExistingCustomerForServiceRequest(fields: ForcedServiceRequestFields): Promise<any | null> {
-  const phone = fields.phone.trim();
-  const email = fields.email.trim();
-  const customerName = fields.customerName.trim();
-
-  if (phone) {
-    const exactPhone = await db.select().from(customers).where(eq(customers.phone, phone)).limit(1);
-    if (exactPhone[0]) return exactPhone[0];
-
-    const normalizedInputPhone = normalizeComparablePhone(phone);
-    if (normalizedInputPhone) {
-      const allCustomers = await db.select().from(customers);
-      const normalizedMatch = allCustomers.find(customer => normalizeComparablePhone(customer.phone || "") === normalizedInputPhone);
-      if (normalizedMatch) return normalizedMatch;
-    }
-  }
-
-  if (email) {
-    const exactEmail = await db.select().from(customers).where(eq(customers.email, email)).limit(1);
-    if (exactEmail[0]) return exactEmail[0];
-  }
-
-  if (customerName) {
-    const exactName = await db.select().from(customers).where(eq(customers.name, customerName)).limit(1);
-    if (exactName[0]) return exactName[0];
-
-    const fuzzyName = await db.select().from(customers).where(like(customers.name, `%${customerName}%`)).limit(1);
-    if (fuzzyName[0]) return fuzzyName[0];
-  }
-
-  return null;
-}
-
-function validateForcedServiceRequestFields(fields: ForcedServiceRequestFields) {
-  const missing: string[] = [];
-  if (isMissingTemplateValue(fields.customerName) || fields.customerName === "Unknown") missing.push("Customer Name");
-  if (isMissingTemplateValue(fields.phone)) missing.push("Contact Number");
-  if (isMissingTemplateValue(fields.implementationType)) missing.push("Implementation Type");
-  if (isMissingTemplateValue(fields.issueDescription)) missing.push("Description");
-  if (isMissingTemplateValue(fields.location)) missing.push("Service Location");
-  if (missing.length > 0) {
-    throw Object.assign(new Error(`Missing required service request fields: ${missing.join(", ")}.`), { statusCode: 400 });
-  }
-}
-
 async function saveForcedServiceRequestFromMessage(input: string, authUser: AuthUser): Promise<ForcedServiceRequestResult | null> {
   const parsed = parseForcedServiceRequest(input);
   if (!parsed) return null;
-
-  const fields: ForcedServiceRequestFields = { ...parsed };
-  if (authUser.role === "staff" && authUser.name.trim()) {
-    fields.requestedPerson = authUser.name.trim();
-  }
-  validateForcedServiceRequestFields(fields);
-
-  const matchedCustomer = await findExistingCustomerForServiceRequest(fields);
-  let customerId = matchedCustomer?.id ? Number(matchedCustomer.id) : 0;
-  let customerCreated = false;
-  const region = extractRegionName(fields.location) || fields.location;
-
-  if (!matchedCustomer) {
-    const [customerResult]: any = await db.insert(customers).values({
-      name: fields.customerName,
-      contactName: fields.contactName,
-      phone: fields.phone,
-      email: fields.email,
-      region,
-      implementationType: fields.implementationType,
-      vehicleCount: fields.quantity,
-      createdBy: authUser.name.trim() || "guest",
-    });
-    customerId = Number(customerResult.insertId || 0);
-    customerCreated = true;
-  }
-
-  const customerName = matchedCustomer?.name || fields.customerName;
-  const salesType = matchedCustomer ? "Existing" : "New";
-  const notes = [
-    fields.preferredDateTime ? `Preferred Date/Time: ${fields.preferredDateTime}` : "",
-    fields.driverNumber ? `Driver Number: ${fields.driverNumber}` : "",
-  ].filter(Boolean).join("\n");
-
-  const serviceInsert = {
-    createdAt: new Date().toISOString().substring(0, 10),
-    source: "WhatsApp",
-    region,
-    status: "New Lead",
-    implementationType: fields.implementationType,
-    customerName,
-    contactName: fields.contactName,
-    phone: fields.phone,
-    email: fields.email,
-    newQty: fields.quantity,
-    accessories: fields.accessories,
-    requestedPerson: fields.requestedPerson,
-    salesPerson: fields.requestedPerson,
-    salesType,
-    comment: fields.issueDescription,
-    issueDescription: fields.issueDescription,
-    location: fields.location,
-    paymentStatus: fields.paymentStatus,
-    amount: fields.amount,
-    projectValue: fields.amount,
-    priceDetails: fields.amount,
-    vehicleDetails: fields.vehiclePlate,
-    notes,
-    jobStatus: "Pending",
-    createdBy: authUser.name.trim() || "guest",
-  };
-
-  const [serviceResult]: any = await db.insert(serviceRequests).values(serviceInsert);
-  const serviceRequestId = Number(serviceResult.insertId || 0);
-
-  let salesplusSaved = false;
-  try {
-    await saveLocalSalesplusEntry({
-      ...serviceInsert,
-      customerId,
-      customer_id: customerId,
-      customerName,
-      newQty: fields.quantity,
-      requestedPerson: fields.requestedPerson,
-    }, serviceRequestId, fields.requestedPerson);
-    salesplusSaved = true;
-  } catch (salesplusErr) {
-    console.error("Failed to save local Salesplus entry for forced service request:", salesplusErr);
-  }
-
-  const incompleteContactName = /^(mr|mrs|ms|miss|sir|madam)\.?$/i.test(fields.contactName.trim());
-  const answer = [
-    matchedCustomer
-      ? "Existing customer found, so I linked the service request to that customer and saved it."
-      : "No existing customer found, so I created a new customer and saved the service request.",
-    "",
-    `Request ID: ${serviceRequestId}`,
-    `Customer: ${customerName}`,
-    fields.contactName ? `Contact Person: ${fields.contactName}${incompleteContactName ? " (incomplete in request)" : ""}` : "",
-    `Phone: ${fields.phone}`,
-    fields.driverNumber ? `Driver Phone: ${fields.driverNumber}` : "",
-    `Type: ${fields.implementationType}`,
-    `Issue: ${fields.issueDescription}`,
-    fields.vehiclePlate ? `Plate: ${fields.vehiclePlate}` : "",
-    `Quantity: ${fields.quantity}`,
-    `Location: ${fields.location}`,
-    incompleteContactName ? "Note: The contact person field was saved as provided because the full name was missing from the request." : "",
-  ].filter(Boolean).join("\n");
-
-  return {
-    answer,
-    customerMatched: Boolean(matchedCustomer),
-    customerCreated,
-    customerId,
-    serviceRequestId,
-    salesplusSaved,
-    fields: {
-      ...fields,
-      customerName,
-    },
-  };
+  return saveForcedServiceRequestFields(parsed, authUser, extractRegionName);
 }
 
 async function handleAIRecordSave(reply: string, userRole: string = "guest", userName: string = ""): Promise<{ reply: string; savedRecord?: any }> {
@@ -3896,29 +3334,11 @@ async function handleAIRecordSave(reply: string, userRole: string = "guest", use
 
       // Synchronize registration customer to customers table
       try {
-        const customerName = mapped.customerName || "Unknown";
-        if (customerName && customerName !== "Unknown") {
-          const existing = await db.select().from(customers).where(eq(customers.name, customerName));
-          const totalQty = parseInt(mapped.newQty || 1);
-          if (existing.length === 0) {
-            await db.insert(customers).values({
-              name: customerName,
-              contactName: mapped.contactName || "",
-              phone: mapped.phone || "",
-              email: mapped.email || "",
-              region: mapped.region || "",
-              implementationType: mapped.implementationType || "",
-              vehicleCount: totalQty,
-              createdBy: userName || 'guest'
-            });
-            console.log(`[AI Auto-Save] Synchronized customer ${customerName} into customers table.`);
-          } else {
-            const currentCount = existing[0].vehicleCount || 0;
-            await db.update(customers)
-              .set({ vehicleCount: currentCount + totalQty })
-              .where(eq(customers.name, customerName));
-            console.log(`[AI Auto-Save] Updated existing customer ${customerName} vehicleCount to ${currentCount + totalQty}`);
-          }
+        const syncResult = await syncRegistrationCustomer(mapped, userName || "guest", 1);
+        if (syncResult.action === "created") {
+          console.log(`[AI Auto-Save] Synchronized customer ${syncResult.customerName} into customers table.`);
+        } else if (syncResult.action === "updated") {
+          console.log(`[AI Auto-Save] Updated existing customer ${syncResult.customerName} vehicleCount to ${syncResult.vehicleCount}`);
         }
       } catch (custErr) {
         console.error("Failed to auto-sync customer:", custErr);
@@ -4187,34 +3607,11 @@ export async function startServer() {
 
       // Synchronize lead customer to customers table
       try {
-        const customerName = body.customerName || body.customer_name;
-        if (customerName && customerName !== "Unknown") {
-          const existing = await db.select().from(customers).where(eq(customers.name, customerName));
-          const totalQty = parseInt(body.newQty || body.new_qty || 0) + 
-                           parseInt(body.migrateQty || body.migrate_qty || 0) + 
-                           parseInt(body.tradingQty || body.trading_qty || 0) + 
-                           parseInt(body.serviceQty || body.service_qty || 0) + 
-                           parseInt(body.otherQty || body.other_qty || 0);
-
-          if (existing.length === 0) {
-            await db.insert(customers).values({
-              name: customerName,
-              contactName: body.contactName || body.contact_name || "",
-              phone: body.phone || "",
-              email: body.email || "",
-              region: body.region || "",
-              implementationType: body.implementationType || body.implementation_type || "",
-              vehicleCount: totalQty > 0 ? totalQty : 1,
-              createdBy: userName || 'guest'
-            });
-            console.log(`[API Leads/New] Synchronized customer ${customerName} into customers table.`);
-          } else {
-            const currentCount = existing[0].vehicleCount || 0;
-            await db.update(customers)
-              .set({ vehicleCount: currentCount + totalQty })
-              .where(eq(customers.name, customerName));
-            console.log(`[API Leads/New] Updated existing customer ${customerName} vehicleCount to ${currentCount + totalQty}`);
-          }
+        const syncResult = await syncRegistrationCustomer(body, userName || "guest");
+        if (syncResult.action === "created") {
+          console.log(`[API Leads/New] Synchronized customer ${syncResult.customerName} into customers table.`);
+        } else if (syncResult.action === "updated") {
+          console.log(`[API Leads/New] Updated existing customer ${syncResult.customerName} vehicleCount to ${syncResult.vehicleCount}`);
         }
       } catch (custErr) {
         console.error("API failed to sync customer:", custErr);
@@ -4307,38 +3704,11 @@ export async function startServer() {
 
       // Synchronize lead customer details to customers table on lead edit
       try {
-        if (custName && custName !== "Unknown") {
-          const existing = await db.select().from(customers).where(eq(customers.name, custName));
-          const totalQty = parseInt(b.newQty || b.new_qty || 0) + 
-                           parseInt(b.migrateQty || b.migrate_qty || 0) + 
-                           parseInt(b.tradingQty || b.trading_qty || 0) + 
-                           parseInt(b.serviceQty || b.service_qty || 0) + 
-                           parseInt(b.otherQty || b.other_qty || 0);
-
-          if (existing.length === 0) {
-            await db.insert(customers).values({
-              name: custName,
-              contactName: b.contactName || b.contact_name || "",
-              phone: b.phone || "",
-              email: b.email || "",
-              region: b.region || "",
-              implementationType: b.implementationType || b.implementation_type || "",
-              vehicleCount: totalQty > 0 ? totalQty : 1
-            });
-            console.log(`[API Leads/Edit] Created synchronized customer ${custName} on lead edit.`);
-          } else {
-            await db.update(customers)
-              .set({ 
-                contactName: b.contactName || b.contact_name || existing[0].contactName,
-                phone: b.phone || existing[0].phone,
-                email: b.email || existing[0].email,
-                region: b.region || existing[0].region,
-                implementationType: b.implementationType || b.implementation_type || existing[0].implementationType,
-                vehicleCount: totalQty > 0 ? totalQty : existing[0].vehicleCount
-              })
-              .where(eq(customers.name, custName));
-            console.log(`[API Leads/Edit] Synchronized existing customer ${custName} details.`);
-          }
+        const syncResult = await syncLeadEditCustomer({ ...b, customerName: custName });
+        if (syncResult.action === "created") {
+          console.log(`[API Leads/Edit] Created synchronized customer ${syncResult.customerName} on lead edit.`);
+        } else if (syncResult.action === "updated") {
+          console.log(`[API Leads/Edit] Synchronized existing customer ${syncResult.customerName} details.`);
         }
       } catch (custErr) {
         console.error("API failed to sync customer on update:", custErr);
@@ -4505,19 +3875,11 @@ export async function startServer() {
         return res.status(400).json({ error: "Question is required." });
       }
 
-      await db.insert(messages).values({
-        role: "user",
-        content: message,
-        username: chatChannel,
-      });
+      await saveChatMessage("user", message, chatChannel);
 
       const forcedServiceRequest = await saveForcedServiceRequestFromMessage(message, authUser);
       if (forcedServiceRequest) {
-        await db.insert(messages).values({
-          role: "assistant",
-          content: cleanVisibleAssistantText(forcedServiceRequest.answer),
-          username: chatChannel,
-        });
+        await saveChatMessage("assistant", cleanVisibleAssistantText(forcedServiceRequest.answer), chatChannel);
 
         return res.json({
           answer: cleanVisibleAssistantText(forcedServiceRequest.answer),
@@ -4590,11 +3952,7 @@ export async function startServer() {
           ]),
         ].join("\n"));
 
-        await db.insert(messages).values({
-          role: "assistant",
-          content: answer,
-          username: chatChannel,
-        });
+        await saveChatMessage("assistant", answer, chatChannel);
 
         return res.json({
           answer,
@@ -4622,11 +3980,7 @@ export async function startServer() {
         rowCount: rows.length,
       };
 
-      await db.insert(messages).values({
-        role: "assistant",
-        content: answer,
-        username: chatChannel,
-      });
+      await saveChatMessage("assistant", answer, chatChannel);
 
       return res.json({
         answer,
@@ -4643,11 +3997,7 @@ export async function startServer() {
         const authUser = getAuthUser(req);
         const chatIdentity = resolveChatIdentity(authUser);
         const aiMode = normalizeQueryAiMode(req.body?.aiMode, authUser);
-        await db.insert(messages).values({
-          role: "assistant",
-          content: answer,
-          username: getModeScopedChatChannel(chatIdentity.channel, aiMode),
-        });
+        await saveChatMessage("assistant", answer, getModeScopedChatChannel(chatIdentity.channel, aiMode));
       } catch {
         // Do not mask the original query error with a history-write error.
       }
@@ -4677,29 +4027,18 @@ export async function startServer() {
         return res.status(403).json({ error: "Admin can only view guest and staff chats. Switch to Admin chat to send messages." });
       }
 
-      const persistedHistory = await db.select().from(messages)
-        .where(eq(messages.username, chatChannel))
-        .orderBy(desc(messages.timestamp))
-        .limit(12);
+      const persistedHistory = await getRecentChatMessages(chatChannel, 12);
       const chatHistory = persistedHistory
         .reverse()
         .map((h: any) => ({ role: h.role, content: h.content }));
 
       // Save user message (partitioned by username)
-      await db.insert(messages).values({ 
-        role: 'user', 
-        content: message,
-        username: chatChannel
-      });
+      await saveChatMessage("user", message, chatChannel);
 
       const forcedServiceRequest = await saveForcedServiceRequestFromMessage(message, authUser);
       if (forcedServiceRequest) {
         const reply = cleanVisibleAssistantText(forcedServiceRequest.answer);
-        await db.insert(messages).values({
-          role: "assistant",
-          content: reply,
-          username: chatChannel,
-        });
+        await saveChatMessage("assistant", reply, chatChannel);
 
         return res.json({
           reply,
@@ -4724,11 +4063,7 @@ export async function startServer() {
 
       if (isGenericTicketCreationPrompt(message)) {
         const reply = cleanVisibleAssistantText(formatGenericTicketCreationPrompt(userRole, userName));
-        await db.insert(messages).values({
-          role: "assistant",
-          content: reply,
-          username: chatChannel,
-        });
+        await saveChatMessage("assistant", reply, chatChannel);
         return res.json({ reply });
       }
 
@@ -4780,11 +4115,7 @@ export async function startServer() {
             ? "Fresh guest session: there are no records or previous chats linked to this guest account yet. You can create a new ticket now, and only records created in this guest session will appear here."
             : formatStaffRecordList(`Latest ${guestRows.length} records for this guest session`, guestRows));
 
-          await db.insert(messages).values({ 
-            role: 'assistant', 
-            content: guestReply,
-            username: chatChannel
-          });
+          await saveChatMessage("assistant", guestReply, chatChannel);
           return res.json({ reply: guestReply });
         }
       }
@@ -4829,11 +4160,7 @@ export async function startServer() {
 
         if (attemptedBlockedAction) {
           const deniedMessage = cleanVisibleAssistantText("Access Denied: Staff users can create and view records but cannot modify or delete existing records. Please contact a Manager or Administrator.");
-          await db.insert(messages).values({ 
-            role: 'assistant', 
-            content: deniedMessage,
-            username: chatChannel
-          });
+          await saveChatMessage("assistant", deniedMessage, chatChannel);
           return res.json({ reply: deniedMessage });
         }
 
@@ -4856,11 +4183,7 @@ export async function startServer() {
             ? `${userName}, I do not see any pending or open requests assigned to you right now.`
             : formatStaffRecordList(`Pending/open requests for ${userName}`, pendingRows));
 
-          await db.insert(messages).values({ 
-            role: 'assistant', 
-            content: pendingReply,
-            username: chatChannel
-          });
+          await saveChatMessage("assistant", pendingReply, chatChannel);
           return res.json({ reply: pendingReply });
         }
 
@@ -4883,11 +4206,7 @@ export async function startServer() {
             ? `${userName}, I do not see any records linked to your staff account right now.`
             : formatStaffRecordList(`Latest ${latestRows.length} records for ${userName}`, latestRows));
 
-          await db.insert(messages).values({ 
-            role: 'assistant', 
-            content: latestReply,
-            username: chatChannel
-          });
+          await saveChatMessage("assistant", latestReply, chatChannel);
           return res.json({ reply: latestReply });
         }
       }
@@ -5050,10 +4369,7 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Customer: "${s.customerName}" | 
       // Dynamically load prompts to ensure any manual or UI updates to prompts.json are picked up in real-time
       let currentPrompts = { ...prompts };
       try {
-        if (fs.existsSync(promptsPath)) {
-          const fileData = JSON.parse(fs.readFileSync(promptsPath, "utf8"));
-          currentPrompts = { ...currentPrompts, ...fileData };
-        }
+        currentPrompts = loadPrompts();
       } catch (err) {
         console.error("Failed to load prompts dynamically, using in-memory defaults:", err);
       }
@@ -5139,68 +4455,10 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
 `;
       const localSystemInstruction = buildLocalLlmSystemInstruction(systemInstruction);
 
-      const stripRecordTriggers = (text: string): string => {
-        return text
-          .replace(/\[{1,2}(?:SAVE_RECORD|UPDATE_RECORD|DELETE_RECORD):.*?\]{1,2}/gs, "")
-          .trim();
-      };
-
-      const formatCompareChatReply = (text: string): string => {
-        return stripRecordTriggers(text)
-          .replace(/^\s*Assistant:\s*/i, "")
-          .replace(/^.*\b(?:saving|save|created successfully|registered successfully)\b.*$/gim, "")
-          .replace(/\*\*([^*]+)\*\*/g, "$1")
-          .replace(/\*([^*\n:]+)\*:/g, "$1:")
-          .replace(/\*/g, "")
-          .replace(/\n{3,}/g, "\n\n")
-          .trim();
-      };
-
-      const sanitizeProviderChatHistory = () => {
-        return chatHistory
-          .map((h: any) => {
-            const role = (h.role === "assistant" || h.role === "model") ? "assistant" : "user";
-            const content = h.content || (h.parts && h.parts[0]?.text) || "";
-            return { role, content: String(content).trim() } as { role: "user" | "assistant"; content: string };
-          })
-          .filter(h => {
-            if (!h.content) return false;
-            if (h.role !== "assistant") return true;
-            if (/^\s*Compare Both result:/i.test(h.content)) return false;
-            if (/^\s*(Gemini|Local LLM|NVIDIA|Nex AGI|GPT OSS 120B|Gemma|Cohere|OpenRouter)\s+\(\d+ms\)/im.test(h.content)) return false;
-            return true;
-          })
-          .slice(-10);
-      };
-
-      const cleanLocalChatReply = (text: string): string => {
-        return text
-          .replace(/^\s*Assistant:\s*/i, "")
-          .replace(/\*\*([^*]+)\*\*/g, "$1")
-          .replace(/\*([^*\n:]+)\*:/g, "$1:")
-          .replace(/\*/g, "")
-          .replace(/\bChoose from the dropdown below\.?/gi, "")
-          .replace(/\bfrom the dropdown below\.?/gi, "")
-          .replace(/\bPlease fill in this information\b/gi, "Please share this information")
-          .replace(/\n+\s*User:\s*[\s\S]*$/i, "")
-          .replace(/\n+\s*Assistant:\s*[\s\S]*$/i, "")
-          .replace(/\n{3,}/g, "\n\n")
-          .trim();
-      };
-
-      const applyStaffRequestedPersonDefault = (text: string): string => {
-        if (userRole !== "staff" || !userName) return text;
-        const escapedName = userName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        if (new RegExp(`Requested Person\\s*:\\s*${escapedName}\\b`, "i").test(text)) {
-          return text;
-        }
-        return text
-          .replace(/^(\s*[-•]?\s*Requested\s+(?:Person|by)\s*:\s*)$/gim, `$1${userName} (from staff login)`)
-          .replace(/^(\s*[-•]?\s*Requested\s+(?:Person|by)\s*:\s*)(?:N\/A|TBD|Unknown|Not provided|Use the logged-in staff member when this is a staff session\.?)\s*$/gim, `$1${userName} (from staff login)`);
-      };
+      const sanitizedChatHistory = () => sanitizeProviderChatHistory(chatHistory);
 
       const formatLocalCompareReply = (text: string): string => {
-        const cleaned = applyStaffRequestedPersonDefault(formatCompareChatReply(text));
+        const cleaned = applyStaffRequestedPersonDefault(formatCompareChatReply(text), userRole, userName);
         const templateDraft = formatServiceTemplateDraft(message);
         if (templateDraft) {
           return templateDraft;
@@ -5213,22 +4471,17 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
 
         try {
           console.log(`[AI Chat] Mode=gemini, using ${cloudProviderLabel} with rich live DB context: model=${cleanedGeminiKey ? geminiModel : openRouterModel}`);
-          const cleanedHistory = sanitizeProviderChatHistory();
+          const cleanedHistory = sanitizedChatHistory();
 
           let reply = "";
           if (genAI && cleanedGeminiKey) {
-            const conversation = [
-              ...cleanedHistory.map(h => `${h.role === "assistant" ? "Assistant" : "User"}: ${h.content}`),
-              `User: ${message}`,
-            ].join("\n\n");
-            const response = await genAI.models.generateContent({
+            reply = await runGeminiChatCompletion({
+              genAI,
               model: geminiModel,
-              contents: conversation,
-              config: {
-                systemInstruction,
-              },
+              systemInstruction,
+              history: cleanedHistory,
+              message,
             });
-            reply = response.text;
           } else {
             reply = await runOpenRouterChatCompletion({
               messages: [
@@ -5278,56 +4531,17 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
           };
         }
 
-        let ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
-        if (!ollamaUrl.endsWith("/api/chat")) {
-          ollamaUrl = ollamaUrl.replace(/\/$/, "") + "/api/chat";
-        }
-        
         try {
-          const ollamaOptions: any = {
-            num_ctx: Math.max(parseInt(process.env.OLLAMA_NUM_CTX || "4096"), 4096),
-            num_thread: parseInt(process.env.OLLAMA_NUM_THREAD || "6"),
-          };
-
-          const gpuConfig = parseInt(process.env.OLLAMA_NUM_GPU || "-1");
-          ollamaOptions.num_gpu = gpuConfig;
-          
-          if (gpuConfig !== -1) {
-            ollamaOptions.main_gpu = 0;
-          }
-
-          const currentOllamaModel = process.env.OLLAMA_MODEL || "qwen2.5:1.5b";
-
-          const requestBody = {
-            model: currentOllamaModel,
-            messages: [
-              { role: "system", content: localSystemInstruction },
-              ...sanitizeProviderChatHistory(),
-              { role: "user", content: message }
-            ],
-            options: ollamaOptions,
-            keep_alive: process.env.OLLAMA_KEEP_ALIVE || "5m",
-            stream: false
-          };
-
-          if (!fallback) {
-            console.log(`[AI Chat] Mode=local, using Ollama/local LLM: model=${requestBody.model}, options=${JSON.stringify(ollamaOptions)}`);
-          } else {
-            console.log(`[AI Chat] START Ollama fallback: model=${requestBody.model}, options=${JSON.stringify(ollamaOptions)}`);
-          }
-          
-          const response = await axios.post(ollamaUrl, requestBody, { 
-            timeout: 300000,
-            validateStatus: () => true 
+          const reply = await runLocalOllamaChatCompletion({
+            localSystemInstruction,
+            history: sanitizedChatHistory(),
+            message,
+            fallback,
           });
-
-          if (response.status !== 200) {
-            throw new Error(`Ollama returned status ${response.status}`);
-          }
 
           console.log(`[AI Chat] Ollama Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
           return {
-            reply: response.data.message.content,
+            reply,
             durationMs: Date.now() - startTime,
           };
         } catch (ollamaErr) {
@@ -5344,7 +4558,7 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
         const startTime = Date.now();
         try {
           console.log(`[AI Chat] Mode=openrouter, using OpenRouter LLM: model=${extraLlmModel}, reasoning=${extraLlmReasoning}`);
-          const cleanedHistory = sanitizeProviderChatHistory();
+          const cleanedHistory = sanitizedChatHistory();
 
           const reply = await runOpenRouterChatCompletion({
             model: extraLlmModel,
@@ -5376,7 +4590,7 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
         const startTime = Date.now();
         try {
           console.log(`[AI Chat] Mode=nvidia, using ${openRouterPrimaryLabel}/OpenRouter: model=${openRouterModel}`);
-          const cleanedHistory = sanitizeProviderChatHistory();
+          const cleanedHistory = sanitizedChatHistory();
 
           const reply = await runOpenRouterChatCompletion({
             model: openRouterModel,
@@ -5451,11 +4665,7 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
           ]),
         ].join("\n"));
 
-        await db.insert(messages).values({
-          role: 'assistant',
-          content: finalReply,
-          username: chatChannel
-        });
+        await saveChatMessage("assistant", finalReply, chatChannel);
 
         return res.json({
           reply: finalReply,
@@ -5505,7 +4715,7 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
       }
 
       if (usedLocalProvider) {
-        reply = applyStaffRequestedPersonDefault(cleanLocalChatReply(reply));
+        reply = applyStaffRequestedPersonDefault(cleanLocalChatReply(reply), userRole, userName);
       }
 
       const templateRecord = parseServiceTemplateRecord(message);
@@ -5524,11 +4734,7 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
       finalReply = cleanVisibleAssistantText(finalReply);
 
       // Save assistant message partitioned by username
-      await db.insert(messages).values({ 
-        role: 'assistant', 
-        content: finalReply,
-        username: chatChannel
-      });
+      await saveChatMessage("assistant", finalReply, chatChannel);
       
       return res.json({ reply: finalReply, savedRecord: savedResult.savedRecord });
     } catch (error) {
@@ -5557,20 +4763,14 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
         const target = (req.query.target || req.query.username) as string | undefined;
         if (target) {
           const chatIdentity = resolveChatIdentity(authUser, target);
-          history = await db.select().from(messages)
-            .where(historyPredicateFor(chatIdentity.channel))
-            .orderBy(messages.timestamp);
+          history = await getChatMessagesByPredicate(historyPredicateFor(chatIdentity.channel));
         } else {
-          history = await db.select().from(messages)
-            .where(historyPredicateFor("admin"))
-            .orderBy(messages.timestamp);
+          history = await getChatMessagesByPredicate(historyPredicateFor("admin"));
         }
       } else {
         // Filter by username specifically
         const chatIdentity = resolveChatIdentity(authUser);
-        history = await db.select().from(messages)
-          .where(historyPredicateFor(chatIdentity.channel))
-          .orderBy(messages.timestamp);
+        history = await getChatMessagesByPredicate(historyPredicateFor(chatIdentity.channel));
       }
       res.json(history);
     } catch (error) {
@@ -5592,10 +4792,7 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
       // Dynamically load prompts to ensure any manual or UI updates to prompts.json are picked up in real-time
       let currentPrompts = { ...prompts };
       try {
-        if (fs.existsSync(promptsPath)) {
-          const fileData = JSON.parse(fs.readFileSync(promptsPath, "utf8"));
-          currentPrompts = { ...currentPrompts, ...fileData };
-        }
+        currentPrompts = loadPrompts();
       } catch (err) {
         console.error("Failed to load prompts dynamically in /api/ingest:", err);
       }
