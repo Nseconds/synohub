@@ -27,6 +27,7 @@ import {
   saveForcedServiceRequestFields,
   updateLeadRegistration,
   updateServiceTicket,
+  type ForcedServiceRequestFields,
   type ForcedServiceRequestResult,
 } from "../services/serviceRequestService";
 import { syncRegistrationCustomer } from "../services/customerService";
@@ -66,6 +67,7 @@ import {
   type QueryProviderResult,
   type SafeQueryIntent,
 } from "../ai/queryIntentDetector";
+import { buildIntentDetectorSystemPrompt } from "../ai/intentService";
 import { formatActionIntentAnswer } from "../ai/queryResponseFormatter";
 import {
   formatIssueSummary,
@@ -315,7 +317,7 @@ async function runOpenRouterChatCompletion(args: {
 
 async function runLocalIntentProvider(message: string): Promise<QueryProviderResult> {
   const startTime = Date.now();
-  const detectorPath = path.join(process.cwd(), "ai", "intentDetector.py");
+  const detectorPath = path.join(process.cwd(), "src", "ai", "intentDetector.py");
   console.log("[Safe Query] Mode=local, using Python/local intent detector.");
 
   const deterministic = detectQueryIntent(message);
@@ -360,42 +362,11 @@ async function runGeminiIntentProvider(message: string): Promise<QueryProviderRe
 
   try {
     const allowedIntents = Object.keys(safeQueryHandlers).join(", ");
-    const detectorSystemInstruction = [
-          "You are SynoHub's safe intent detector.",
-          "Return JSON only with keys: intent, params, confidence.",
-          "Never generate SQL, never mention database access, never invent records.",
-          "Only choose one of these whitelisted intents:",
-          allowedIntents,
-          "Use params only for extracted safe values such as ticketId, status, staffName, fromStaffName, region, customerName, value, serviceType, channelName, and limit.",
-          "For write/action commands, only classify the action intent and extracted params. Never claim the action was executed.",
-          `Known staff names: ${staffRoster.join(", ")}.`,
-          "Critical staff rule: if a user asks for records, tickets, requests, leads, jobs, tasks, workload, pending, open, latest, or how many work items for a known staff name, treat the name as staffName, never as customerName or value.",
-          "Critical service type rule: migration, migrations, and migrate questions should use getTicketsByServiceType with serviceType migration.",
-          "Examples:",
-          "records of Athul pls -> {\"intent\":\"getTicketsByStaff\",\"params\":{\"staffName\":\"Athul\",\"limit\":25},\"confidence\":0.95}",
-          "Athul records please -> {\"intent\":\"getTicketsByStaff\",\"params\":{\"staffName\":\"Athul\",\"limit\":25},\"confidence\":0.95}",
-          "How many jobs does Shamnad have? -> {\"intent\":\"getTicketsByStaff\",\"params\":{\"staffName\":\"Shamnad\",\"limit\":25},\"confidence\":0.95}",
-          "how many migrations are ther -> {\"intent\":\"getTicketsByServiceType\",\"params\":{\"serviceType\":\"migration\",\"limit\":50},\"confidence\":0.94}",
-          "Find ticket number 7 -> {\"intent\":\"getTicketById\",\"params\":{\"ticketId\":7},\"confidence\":0.97}",
-          "What tickets need attention? -> {\"intent\":\"getTicketsNeedingAttention\",\"params\":{\"limit\":50},\"confidence\":0.93}",
-          "i want to know my pending list -> {\"intent\":\"getPendingTickets\",\"params\":{\"limit\":50},\"confidence\":0.93}",
-          "Show all completed tickets this week -> {\"intent\":\"getCompletedTicketsThisWeek\",\"params\":{\"limit\":50},\"confidence\":0.94}",
-          "Show all New Lead tickets -> {\"intent\":\"getTicketsByStatusLabel\",\"params\":{\"statusLabel\":\"new lead\",\"limit\":50},\"confidence\":0.94}",
-          "Show today's jobs for all technicians -> {\"intent\":\"getOpenTickets\",\"params\":{\"limit\":50},\"confidence\":0.91}",
-          "Show latest service requests in Dubai -> {\"intent\":\"getTicketsByRegion\",\"params\":{\"region\":\"Dubai\",\"limit\":10,\"latest\":true},\"confidence\":0.92}",
-          "How many tickets in Sharjah? -> {\"intent\":\"getTicketsByRegion\",\"params\":{\"region\":\"Sharjah\",\"limit\":10,\"countOnly\":true},\"confidence\":0.92}",
-          "pending records of Naseeb -> {\"intent\":\"getPendingTicketsByStaff\",\"params\":{\"staffName\":\"Naseeb\",\"limit\":25},\"confidence\":0.96}",
-          "tickets for Celine -> {\"intent\":\"getTicketsByStaff\",\"params\":{\"staffName\":\"Celine\",\"limit\":25},\"confidence\":0.95}",
-          "Update ticket 5 to Completed -> {\"intent\":\"updateTicketStatus\",\"params\":{\"ticketId\":5,\"status\":\"Completed\"},\"confidence\":0.94}",
-          "Assign ticket 12 to Athul -> {\"intent\":\"assignTicket\",\"params\":{\"ticketId\":12,\"staffName\":\"Athul\"},\"confidence\":0.94}",
-          "Reassign ticket 3 from Faizal to Nishad -> {\"intent\":\"reassignTicket\",\"params\":{\"ticketId\":3,\"fromStaffName\":\"Faizal\",\"staffName\":\"Nishad\"},\"confidence\":0.95}",
-          "Cancel ticket 9 -> {\"intent\":\"cancelTicket\",\"params\":{\"ticketId\":9},\"confidence\":0.95}",
-          "Delete ticket 15 -> {\"intent\":\"deleteTicket\",\"params\":{\"ticketId\":15},\"confidence\":0.95}",
-          "Create new service request -> {\"intent\":\"createServiceRequest\",\"params\":{},\"confidence\":0.92}",
-          "New lead for ARKAN ALDAR CONTRACTING contact Ms. george Dubai LOCATOR -> {\"intent\":\"createLead\",\"params\":{\"customerName\":\"ARKAN ALDAR CONTRACTING\",\"region\":\"Dubai\"},\"confidence\":0.93}",
-          "Create migration ticket for KLEEMOL CAR RENTAL -> {\"intent\":\"createMigrationTicket\",\"params\":{\"customerName\":\"KLEEMOL CAR RENTAL\",\"serviceType\":\"migration\"},\"confidence\":0.93}",
-          "Create installation ticket for KLEEMOL CAR RENTAL -> {\"intent\":\"createInstallationTicket\",\"params\":{\"customerName\":\"KLEEMOL CAR RENTAL\",\"serviceType\":\"installation\"},\"confidence\":0.93}",
-    ].join("\n");
+    const detectorSystemInstruction = buildIntentDetectorSystemPrompt({
+      kind: "gemini",
+      allowedIntents,
+      staffNames: staffRoster,
+    });
 
     let raw = "";
     if (genAI && cleanedGeminiKey) {
@@ -480,6 +451,11 @@ async function runOpenRouterIntentProvider(message: string): Promise<QueryProvid
     }
 
     const allowedIntents = Object.keys(safeQueryHandlers).join(", ");
+    const detectorSystemInstruction = buildIntentDetectorSystemPrompt({
+      kind: "openrouter",
+      allowedIntents,
+      staffNames: staffRoster,
+    });
     const raw = await runOpenRouterChatCompletion({
       model: extraLlmModel,
       reasoning: extraLlmReasoning,
@@ -489,20 +465,7 @@ async function runOpenRouterIntentProvider(message: string): Promise<QueryProvid
       messages: [
         {
           role: "system",
-          content: [
-            "You are SynoHub's safe intent detector.",
-            "Return JSON only with keys: intent, params, confidence.",
-            "Never generate SQL. Never claim an action was executed.",
-            "Only choose one of these whitelisted intents:",
-            allowedIntents,
-            "Extract params such as ticketId, status, staffName, fromStaffName, region, customerName, value, serviceType, channelName, and limit.",
-            `Known staff names: ${staffRoster.join(", ")}.`,
-            "Examples:",
-            "i want to know my pending list -> {\"intent\":\"getPendingTickets\",\"params\":{\"limit\":50},\"confidence\":0.93}",
-            "Find ticket number 7 -> {\"intent\":\"getTicketById\",\"params\":{\"ticketId\":7},\"confidence\":0.97}",
-            "Assign ticket 12 to Athul -> {\"intent\":\"assignTicket\",\"params\":{\"ticketId\":12,\"staffName\":\"Athul\"},\"confidence\":0.94}",
-            "Create new service request -> {\"intent\":\"createServiceRequest\",\"params\":{},\"confidence\":0.92}",
-          ].join("\n"),
+          content: detectorSystemInstruction,
         },
         { role: "user", content: `User question: ${message}` },
       ],
@@ -535,6 +498,11 @@ async function runNvidiaIntentProvider(message: string): Promise<QueryProviderRe
     }
 
     const allowedIntents = Object.keys(safeQueryHandlers).join(", ");
+    const detectorSystemInstruction = buildIntentDetectorSystemPrompt({
+      kind: "nvidia",
+      allowedIntents,
+      staffNames: staffRoster,
+    });
     const raw = await runOpenRouterChatCompletion({
       model: openRouterModel,
       reasoning: true,
@@ -544,15 +512,7 @@ async function runNvidiaIntentProvider(message: string): Promise<QueryProviderRe
       messages: [
         {
           role: "system",
-          content: [
-            "You are SynoHub's safe intent detector.",
-            "Return JSON only with keys: intent, params, confidence.",
-            "Never generate SQL. Never claim an action was executed.",
-            "Only choose one of these whitelisted intents:",
-            allowedIntents,
-            "Extract params such as ticketId, status, staffName, fromStaffName, region, customerName, value, serviceType, channelName, and limit.",
-            `Known staff names: ${staffRoster.join(", ")}.`,
-          ].join("\n"),
+          content: detectorSystemInstruction,
         },
         { role: "user", content: `User question: ${message}` },
       ],
@@ -1108,10 +1068,70 @@ function mapInputToSchema(input: any): any {
   return schema;
 }
 
-async function saveForcedServiceRequestFromMessage(input: string, authUser: AuthUser): Promise<ForcedServiceRequestResult | null> {
+const pendingForcedServiceConfirmations = new Map<string, {
+  fields: ForcedServiceRequestFields;
+  possibleCustomerIds: number[];
+  createdAt: number;
+}>();
+
+function parseCustomerConfirmationReply(input: string, possibleCustomerIds: number[]): { confirmedCustomerId?: number; forceNewCustomer?: boolean } | null {
+  const normalized = normalizeQueryText(input);
+  const trimmed = normalized.trim();
+  if (
+    /^(no|nope)$/i.test(trimmed) ||
+    /\b(new customer|create new|new one|different customer|not same|not the same)\b/.test(trimmed)
+  ) {
+    return { forceNewCustomer: true };
+  }
+
+  if (/\b(yes|same|existing|link|use|correct)\b/.test(normalized)) {
+    const idMatch = normalized.match(/\b(\d{1,10})\b/);
+    const confirmedCustomerId = idMatch ? Number(idMatch[1]) : possibleCustomerIds[0];
+    if (confirmedCustomerId && possibleCustomerIds.includes(confirmedCustomerId)) {
+      return { confirmedCustomerId };
+    }
+  }
+
+  return null;
+}
+
+function isExpiredPendingConfirmation(createdAt: number): boolean {
+  return Date.now() - createdAt > 30 * 60 * 1000;
+}
+
+function isAcknowledgementOnlyMessage(input: string): boolean {
+  return /^(ok|okay|k|kk|yes okay|alright|all right|noted|got it|thanks|thank you|fine)$/i.test(String(input || "").trim());
+}
+
+async function saveForcedServiceRequestFromMessage(
+  input: string,
+  authUser: AuthUser,
+  chatChannel: string,
+): Promise<ForcedServiceRequestResult | null> {
+  const pending = pendingForcedServiceConfirmations.get(chatChannel);
+  if (pending) {
+    if (isExpiredPendingConfirmation(pending.createdAt)) {
+      pendingForcedServiceConfirmations.delete(chatChannel);
+    } else {
+      const decision = parseCustomerConfirmationReply(input, pending.possibleCustomerIds);
+      if (decision) {
+        pendingForcedServiceConfirmations.delete(chatChannel);
+        return saveForcedServiceRequestFields(pending.fields, authUser, extractRegionName, decision);
+      }
+    }
+  }
+
   const parsed = parseForcedServiceRequest(input);
   if (!parsed) return null;
-  return saveForcedServiceRequestFields(parsed, authUser, extractRegionName);
+  const result = await saveForcedServiceRequestFields(parsed, authUser, extractRegionName);
+  if (result.requiresCustomerConfirmation) {
+    pendingForcedServiceConfirmations.set(chatChannel, {
+      fields: result.fields,
+      possibleCustomerIds: (result.possibleCustomers || []).map(customer => customer.id),
+      createdAt: Date.now(),
+    });
+  }
+  return result;
 }
 
 async function handleAIRecordSave(reply: string, userRole: string = "guest", userName: string = ""): Promise<{ reply: string; savedRecord?: any }> {
@@ -1586,7 +1606,8 @@ export async function startServer() {
       const queryUser = { role: authUser.role, name: authUser.name };
       const chatIdentity = resolveChatIdentity(authUser);
       const message = normalizeQueryText(req.body?.message || req.body?.question || req.body?.query);
-      const aiMode = normalizeQueryAiMode(req.body?.aiMode, authUser);
+      const requestedAiMode = normalizeQueryAiMode(req.body?.aiMode, authUser);
+      const aiMode = requestedAiMode === "auto-fallback" ? "local" : requestedAiMode;
       const compareProviders = normalizeCompareProviders(req.body?.compareProviders);
       const chatChannel = getModeScopedChatChannel(chatIdentity.channel, aiMode);
 
@@ -1596,16 +1617,19 @@ export async function startServer() {
 
       await saveChatMessage("user", message, chatChannel);
 
-      const forcedServiceRequest = await saveForcedServiceRequestFromMessage(message, authUser);
+      const forcedServiceRequest = await saveForcedServiceRequestFromMessage(message, authUser, chatChannel);
       if (forcedServiceRequest) {
-        await saveChatMessage("assistant", cleanVisibleAssistantText(forcedServiceRequest.answer), chatChannel);
+        const forcedReply = cleanVisibleAssistantText(forcedServiceRequest.answer);
+        await saveChatMessage("assistant", forcedReply, chatChannel);
 
         return res.json({
-          answer: cleanVisibleAssistantText(forcedServiceRequest.answer),
-          reply: cleanVisibleAssistantText(forcedServiceRequest.answer),
+          answer: forcedReply,
+          reply: forcedReply,
           mode: aiMode,
           winner: "backend",
           intent: "createServiceRequest",
+          requiresCustomerConfirmation: forcedServiceRequest.requiresCustomerConfirmation,
+          possibleCustomers: forcedServiceRequest.possibleCustomers,
           customerMatched: forcedServiceRequest.customerMatched,
           customerCreated: forcedServiceRequest.customerCreated,
           customerId: forcedServiceRequest.customerId,
@@ -1754,23 +1778,29 @@ export async function startServer() {
       // Save user message (partitioned by username)
       await saveChatMessage("user", message, chatChannel);
 
-      const forcedServiceRequest = await saveForcedServiceRequestFromMessage(message, authUser);
+      const forcedServiceRequest = await saveForcedServiceRequestFromMessage(message, authUser, chatChannel);
       if (forcedServiceRequest) {
         const reply = cleanVisibleAssistantText(forcedServiceRequest.answer);
         await saveChatMessage("assistant", reply, chatChannel);
 
         return res.json({
           reply,
-          savedRecord: {
-            id: forcedServiceRequest.serviceRequestId,
-            type: "service",
-            customerId: forcedServiceRequest.customerId,
-            customerMatched: forcedServiceRequest.customerMatched,
-            customerCreated: forcedServiceRequest.customerCreated,
-            salesplusSaved: forcedServiceRequest.salesplusSaved,
-            ...forcedServiceRequest.fields,
-          },
+          ...(forcedServiceRequest.serviceRequestId
+            ? {
+              savedRecord: {
+                id: forcedServiceRequest.serviceRequestId,
+                type: "service",
+                customerId: forcedServiceRequest.customerId,
+                customerMatched: forcedServiceRequest.customerMatched,
+                customerCreated: forcedServiceRequest.customerCreated,
+                salesplusSaved: forcedServiceRequest.salesplusSaved,
+                ...forcedServiceRequest.fields,
+              },
+            }
+            : {}),
           intent: "createServiceRequest",
+          requiresCustomerConfirmation: forcedServiceRequest.requiresCustomerConfirmation,
+          possibleCustomers: forcedServiceRequest.possibleCustomers,
           customerMatched: forcedServiceRequest.customerMatched,
           customerCreated: forcedServiceRequest.customerCreated,
           customerId: forcedServiceRequest.customerId,
@@ -1778,6 +1808,12 @@ export async function startServer() {
           salesplusSaved: forcedServiceRequest.salesplusSaved,
           extracted: forcedServiceRequest.fields,
         });
+      }
+
+      if (isAcknowledgementOnlyMessage(message)) {
+        const reply = cleanVisibleAssistantText("Okay.");
+        await saveChatMessage("assistant", reply, chatChannel);
+        return res.json({ reply });
       }
 
       if (isGenericTicketCreationPrompt(message)) {
@@ -2059,7 +2095,8 @@ export async function startServer() {
         contactName: r.contactName || "",
         region: r.region || "",
         location: r.location || "",
-        status: r.status || "New Lead"
+        status: r.status || "New Lead",
+        createdAt: r.createdAt || ""
       }));
 
       // Map requests for technical services context description
@@ -2070,19 +2107,24 @@ export async function startServer() {
         status: s.jobStatus || "Pending",
         assignee: s.salesPerson || s.requestedPerson || "Unassigned",
         location: s.location || "",
-        amount: s.amount || ""
+        amount: s.amount || "",
+        createdAt: s.createdAt || ""
       }));
 
+      const currentDateLabel = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
       const dbContextStr = `
+CURRENT DATE: ${currentDateLabel}
+If the user asks for today, today's, or todays records, use only records whose Created value is ${currentDateLabel}. Do not treat description words like "tomorrow" as today's date.
+
 CURRENT CRM DATABASE RECORDS:
  --- Customers ---
 ${fetchedCustomers.map((c: any) => ` * ID: ${c.id} | Name: "${c.name}" | Contact Person: "${c.contactName || ''}" | Phone: "${c.phone || ''}" | Region: "${c.region || ''}" | Vehicles count: ${c.vehicleCount || 0}`).join('\n')}
 
 --- Lead Registrations ---
-${allRegistrations.map((r: any) => ` * ID: ${r.id} | Customer: "${r.customerName}" | Contact Person: "${r.contactName || ''}" | Region: "${r.region || ''}" | Location: "${r.location || ''}" | Status: "${r.status || 'New Lead'}"`).join('\n')}
+${allRegistrations.map((r: any) => ` * ID: ${r.id} | Created: "${r.createdAt || ''}" | Customer: "${r.customerName}" | Contact Person: "${r.contactName || ''}" | Region: "${r.region || ''}" | Location: "${r.location || ''}" | Status: "${r.status || 'New Lead'}"`).join('\n')}
 
 --- Active Service Queue ---
-${allServices.map((s: any) => ` * ID: ${s.id} | Customer: "${s.customerName}" | Description: "${s.description || ''}" | Status: "${s.status || 'Ongoing'}" | Assignee: "${s.assignee || 'Unassigned'}" | Location: "${s.location || ''}" | Amount: "${s.amount || ''}"`).join('\n')}
+${allServices.map((s: any) => ` * ID: ${s.id} | Created: "${s.createdAt || ''}" | Customer: "${s.customerName}" | Description: "${s.description || ''}" | Status: "${s.status || 'Ongoing'}" | Assignee: "${s.assignee || 'Unassigned'}" | Location: "${s.location || ''}" | Amount: "${s.amount || ''}"`).join('\n')}
 `;
 
       // Dynamically load prompts to ensure any manual or UI updates to prompts.json are picked up in real-time
@@ -2278,35 +2320,26 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Customer: "${s.customerName}" | 
         return runExtraChatReply();
       };
 
-      if (aiMode === "compare") {
+      const runCompareChatReply = async (): Promise<{
+        reply: string;
+        providers: Record<string, { reply: string; durationMs: number; error?: string }>;
+        compareProviders: QueryProviderName[];
+        durationMs: number;
+      }> => {
+        const startTime = Date.now();
         console.log(`[AI Chat] Mode=compare, running selected providers: ${compareProviders.join(", ")}.`);
         const compareResults = await Promise.all(compareProviders.map(async (provider) => {
           const result = await runSelectedChatProvider(provider);
-          if (provider === "nvidia" && result.error && (isOpenRouterPolicyEndpointError(result.error) || isOpenRouterTemporaryAvailabilityError(result.error))) {
-            const fallbackReason = isOpenRouterPolicyEndpointError(result.error)
-              ? "current OpenRouter account/model policy"
-              : "temporary OpenRouter throttling";
-            console.warn(`${openRouterPrimaryLabel} is unavailable due to ${fallbackReason} in compare mode; using Local LLM fallback.`);
-            const fallback = await runLocalChatReply(true);
-            const fallbackNotice = [
-              isOpenRouterPolicyEndpointError(result.error)
-                ? `${openRouterPrimaryLabel} is unavailable for the current OpenRouter model/account policy.`
-                : `${openRouterPrimaryLabel} is currently throttled or temporarily unavailable through OpenRouter.`,
-              `Configured model: ${openRouterModel}`,
-              "Local LLM fallback result:",
-              "",
-              fallback.reply,
-            ].join("\n");
-
-            return [provider, {
-              ...fallback,
-              reply: fallback.reply ? fallbackNotice : "",
-              error: fallback.reply ? undefined : fallback.error || result.error,
-            }] as const;
-          }
-
           return [provider, result] as const;
         }));
+
+        const successfulResults = compareResults.filter(([, result]) => result.reply && !result.error);
+        if (successfulResults.length === 0) {
+          const errorSummary = compareResults
+            .map(([provider, result]) => `${getProviderLabel(provider)}: ${result.error || "No reply produced."}`)
+            .join(" | ");
+          throw new Error(`Compare mode failed. ${errorSummary}`);
+        }
 
         const finalReply = cleanVisibleAssistantText([
           "Compare Both result:",
@@ -2322,57 +2355,108 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Customer: "${s.customerName}" | 
           ]),
         ].join("\n"));
 
-        await saveChatMessage("assistant", finalReply, chatChannel);
-
-        return res.json({
+        return {
           reply: finalReply,
           providers: Object.fromEntries(compareResults),
           compareProviders,
+          durationMs: Date.now() - startTime,
+        };
+      };
+
+      if (aiMode === "compare") {
+        const compareResult = await runCompareChatReply();
+        await saveChatMessage("assistant", compareResult.reply, chatChannel);
+
+        return res.json({
+          reply: compareResult.reply,
+          providers: compareResult.providers,
+          compareProviders: compareResult.compareProviders,
         });
       }
 
       let reply = "";
       let usedLocalProvider = false;
+      let selectedProvider: string | undefined;
+      let fallbackUsed = false;
+      let fallbackAttempts: Array<{ provider: string; error: string }> = [];
 
-      if (chatProviderMode === "gemini") {
-        const geminiReply = await runGeminiChatReply();
-        if (geminiReply.reply && !geminiReply.error) {
-          reply = geminiReply.reply;
-        } else {
-          if (!cleanedGeminiKey && !cleanedOpenRouterKey) {
-            console.warn("[AI Chat] Mode=gemini requested, but no cloud provider is configured. Falling back to Ollama/local LLM.");
-          } else {
-            console.error(`${cloudProviderLabel} API failed, falling back to Ollama:`, geminiReply.error);
-          }
-          reply = (await runLocalChatReply(true)).reply;
-          usedLocalProvider = true;
+      const requireSuccessfulReply = (
+        provider: string,
+        result: { reply: string; durationMs: number; error?: string }
+      ) => {
+        if (result.reply && !result.error) return result;
+        throw new Error(result.error || `${provider} returned no reply.`);
+      };
+
+      const callManualProvider = async () => {
+        if (chatProviderMode === "gemini") {
+          selectedProvider = "gemini";
+          return requireSuccessfulReply("Gemini", await runGeminiChatReply());
         }
-      } else if (chatProviderMode === "nvidia") {
-        const nvidiaReply = await runNvidiaChatReply();
-        if (nvidiaReply.reply && !nvidiaReply.error) {
-          reply = nvidiaReply.reply;
-        } else {
-          console.error(`${openRouterPrimaryLabel} failed, falling back to Ollama:`, nvidiaReply.error);
-          reply = (await runLocalChatReply(true)).reply;
-          usedLocalProvider = true;
+        if (chatProviderMode === "nvidia") {
+          selectedProvider = "gpt-oss";
+          return requireSuccessfulReply(openRouterPrimaryLabel, await runNvidiaChatReply());
         }
-      } else if (chatProviderMode === "openrouter") {
-        const extraReply = await runExtraChatReply();
-        if (extraReply.reply && !extraReply.error) {
-          reply = extraReply.reply;
-        } else {
-          console.error("OpenRouter failed, falling back to Ollama:", extraReply.error);
-          reply = (await runLocalChatReply(true)).reply;
-          usedLocalProvider = true;
+        if (chatProviderMode === "openrouter") {
+          selectedProvider = "cohere";
+          return requireSuccessfulReply("Cohere", await runExtraChatReply());
         }
-      } else {
+        selectedProvider = "local";
         console.log("[AI Chat] Mode=local, skipping cloud provider.");
-        reply = (await runLocalChatReply()).reply;
+        const localResult = requireSuccessfulReply("Local LLM", await runLocalChatReply());
         usedLocalProvider = true;
+        return localResult;
+      };
+
+      const callAiWithFallback = async () => {
+        const fallbackSequence = [
+          { key: "gemini", label: "Gemini", call: runGeminiChatReply },
+          { key: "gpt-oss", label: openRouterPrimaryLabel, call: runNvidiaChatReply },
+          { key: "compare", label: "Compare Both", call: runCompareChatReply },
+          { key: "local", label: "Local LLM", call: () => runLocalChatReply(true) },
+        ] as const;
+
+        for (let index = 0; index < fallbackSequence.length; index += 1) {
+          const attempt = fallbackSequence[index];
+          try {
+            const result = await attempt.call();
+            if (!result.reply) {
+              throw new Error(`${attempt.label} returned no reply.`);
+            }
+            selectedProvider = attempt.key;
+            fallbackUsed = index > 0;
+            usedLocalProvider = attempt.key === "local";
+            return result;
+          } catch (error) {
+            const message = (error as Error).message;
+            fallbackAttempts.push({ provider: attempt.key, error: message });
+            console.warn(`[AI Chat] Auto Fallback attempt ${index + 1} failed: ${attempt.label}: ${message}`);
+          }
+        }
+
+        throw new Error("All AI providers failed. Gemini, GPT OSS, Compare mode, and Local LLM were unavailable. Please check API keys, network access, and Ollama status.");
+      };
+
+      if (aiMode === "auto-fallback") {
+        const fallbackResult = await callAiWithFallback();
+        reply = fallbackResult.reply;
+      } else {
+        const manualResult = await callManualProvider();
+        reply = manualResult.reply;
       }
 
       if (usedLocalProvider) {
         reply = applyStaffRequestedPersonDefault(cleanLocalChatReply(reply), userRole, userName);
+      }
+      if (aiMode === "auto-fallback" && fallbackUsed && selectedProvider) {
+        const providerLabel = selectedProvider === "gpt-oss"
+          ? openRouterPrimaryLabel
+          : selectedProvider === "compare"
+            ? "Compare Both"
+            : selectedProvider === "local"
+              ? "Local LLM"
+              : "Gemini";
+        reply = `Answered using ${providerLabel} after earlier provider failure.\n\n${reply}`;
       }
 
       const templateRecord = parseServiceTemplateRecord(message);
@@ -2393,7 +2477,12 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Customer: "${s.customerName}" | 
       // Save assistant message partitioned by username
       await saveChatMessage("assistant", finalReply, chatChannel);
       
-      return res.json({ reply: finalReply, savedRecord: savedResult.savedRecord });
+      return res.json({
+        reply: finalReply,
+        savedRecord: savedResult.savedRecord,
+        ...(selectedProvider ? { selectedProvider } : {}),
+        ...(aiMode === "auto-fallback" ? { fallbackUsed, fallbackAttempts } : {}),
+      });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

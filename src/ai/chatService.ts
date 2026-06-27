@@ -1,3 +1,3 @@
-export type SafeQueryAiMode = "gemini" | "local" | "compare" | "nvidia" | "openrouter";
+export type SafeQueryAiMode = "gemini" | "local" | "compare" | "nvidia" | "openrouter" | "auto-fallback";
 
 export * from "./responseFormatter";

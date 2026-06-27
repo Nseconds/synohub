@@ -1,9 +1,10 @@
-import { eq, like } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "../db";
 import { customers, serviceRequests } from "../db/schema";
 import type { AuthUser } from "../auth/users";
 import { saveLocalSalesplusEntry } from "./salesplusService";
 import { syncLeadEditCustomer, syncRegistrationCustomer } from "./customerService";
+import { normalizeLeadPayload, normalizeServiceTicketPayload } from "../utils/validators";
 
 export interface ForcedServiceRequestFields {
   customerName: string;
@@ -23,6 +24,14 @@ export interface ForcedServiceRequestFields {
   paymentStatus: string;
 }
 
+export interface PotentialCustomerMatch {
+  id: number;
+  name: string;
+  contactName: string;
+  phone: string;
+  region: string;
+}
+
 export interface ForcedServiceRequestResult {
   answer: string;
   customerMatched: boolean;
@@ -31,6 +40,13 @@ export interface ForcedServiceRequestResult {
   serviceRequestId: number;
   salesplusSaved: boolean;
   fields: ForcedServiceRequestFields;
+  requiresCustomerConfirmation?: boolean;
+  possibleCustomers?: PotentialCustomerMatch[];
+}
+
+export interface ForcedServiceRequestSaveOptions {
+  confirmedCustomerId?: number;
+  forceNewCustomer?: boolean;
 }
 
 function normalizeComparablePhone(value: string): string {
@@ -41,7 +57,45 @@ function isMissingTemplateValue(value: string): boolean {
   return !value || /^(n\/?a|na|none|null|-)?$/i.test(value.trim());
 }
 
-async function findExistingCustomerForServiceRequest(fields: ForcedServiceRequestFields): Promise<any | null> {
+function normalizeComparableName(value: string): string {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
+}
+
+function toPotentialCustomerMatch(customer: any): PotentialCustomerMatch {
+  return {
+    id: Number(customer.id || 0),
+    name: customer.name || "",
+    contactName: customer.contactName || "",
+    phone: customer.phone || "",
+    region: customer.region || "",
+  };
+}
+
+async function findSimilarCustomersForConfirmation(fields: ForcedServiceRequestFields): Promise<PotentialCustomerMatch[]> {
+  const inputName = normalizeComparableName(fields.customerName);
+  if (!inputName || inputName.length < 4) return [];
+
+  const allCustomers = await db.select().from(customers);
+  return allCustomers
+    .filter(customer => {
+      const existingName = normalizeComparableName(customer.name || "");
+      if (!existingName || existingName === inputName) return false;
+      return existingName.includes(inputName) || inputName.includes(existingName);
+    })
+    .slice(0, 5)
+    .map(toPotentialCustomerMatch);
+}
+
+async function findExistingCustomerForServiceRequest(
+  fields: ForcedServiceRequestFields,
+  options: ForcedServiceRequestSaveOptions = {},
+): Promise<any | null> {
+  if (options.forceNewCustomer) return null;
+  if (options.confirmedCustomerId) {
+    const confirmed = await db.select().from(customers).where(eq(customers.id, options.confirmedCustomerId)).limit(1);
+    if (confirmed[0]) return confirmed[0];
+  }
+
   const phone = fields.phone.trim();
   const email = fields.email.trim();
   const customerName = fields.customerName.trim();
@@ -66,9 +120,6 @@ async function findExistingCustomerForServiceRequest(fields: ForcedServiceReques
   if (customerName) {
     const exactName = await db.select().from(customers).where(eq(customers.name, customerName)).limit(1);
     if (exactName[0]) return exactName[0];
-
-    const fuzzyName = await db.select().from(customers).where(like(customers.name, `%${customerName}%`)).limit(1);
-    if (fuzzyName[0]) return fuzzyName[0];
   }
 
   return null;
@@ -90,6 +141,7 @@ export async function saveForcedServiceRequestFields(
   parsed: ForcedServiceRequestFields,
   authUser: AuthUser,
   resolveRegionName: (text: string) => string | null,
+  options: ForcedServiceRequestSaveOptions = {},
 ): Promise<ForcedServiceRequestResult> {
   const fields: ForcedServiceRequestFields = { ...parsed };
   if (authUser.role === "staff" && authUser.name.trim()) {
@@ -97,7 +149,65 @@ export async function saveForcedServiceRequestFields(
   }
   validateForcedServiceRequestFields(fields);
 
-  const matchedCustomer = await findExistingCustomerForServiceRequest(fields);
+  const matchedCustomer = await findExistingCustomerForServiceRequest(fields, options);
+  if (matchedCustomer && !options.forceNewCustomer && !options.confirmedCustomerId) {
+    const possibleCustomers = [toPotentialCustomerMatch(matchedCustomer)];
+    return {
+      answer: [
+        "I found an existing customer before saving this service request.",
+        "",
+        `Your request says: ${fields.customerName}`,
+        "",
+        `1. ID ${possibleCustomers[0].id} | ${possibleCustomers[0].name}${possibleCustomers[0].contactName ? ` | Contact: ${possibleCustomers[0].contactName}` : ""}${possibleCustomers[0].phone ? ` | Phone: ${possibleCustomers[0].phone}` : ""}${possibleCustomers[0].region ? ` | Region: ${possibleCustomers[0].region}` : ""}`,
+        "",
+        "Is this the same real customer?",
+        `Reply "yes" to link to the existing customer, or reply "new customer" to create ${fields.customerName} as a new customer.`,
+      ].join("\n"),
+      customerMatched: false,
+      customerCreated: false,
+      customerId: 0,
+      serviceRequestId: 0,
+      salesplusSaved: false,
+      fields,
+      requiresCustomerConfirmation: true,
+      possibleCustomers,
+    };
+  }
+
+  if (!matchedCustomer && !options.forceNewCustomer && !options.confirmedCustomerId) {
+    const possibleCustomers = await findSimilarCustomersForConfirmation(fields);
+    if (possibleCustomers.length > 0) {
+      const matchLines = possibleCustomers.map((customer, index) => {
+        const details = [
+          customer.contactName ? `Contact: ${customer.contactName}` : "",
+          customer.phone ? `Phone: ${customer.phone}` : "",
+          customer.region ? `Region: ${customer.region}` : "",
+        ].filter(Boolean).join(" | ");
+        return `${index + 1}. ID ${customer.id} | ${customer.name}${details ? ` | ${details}` : ""}`;
+      });
+
+      return {
+        answer: [
+          "I found a similar existing customer before saving this service request.",
+          "",
+          `Your request says: ${fields.customerName}`,
+          "",
+          ...matchLines,
+          "",
+          "Is this the same real customer?",
+          `Reply "yes" to link to the existing customer, or reply "new customer" to create ${fields.customerName} as a new customer.`,
+        ].join("\n"),
+        customerMatched: false,
+        customerCreated: false,
+        customerId: 0,
+        serviceRequestId: 0,
+        salesplusSaved: false,
+        fields,
+        requiresCustomerConfirmation: true,
+        possibleCustomers,
+      };
+    }
+  }
   let customerId = matchedCustomer?.id ? Number(matchedCustomer.id) : 0;
   let customerCreated = false;
   const region = resolveRegionName(fields.location) || fields.location;
@@ -206,49 +316,50 @@ export async function saveForcedServiceRequestFields(
 export async function createLeadRegistration(body: any, authUser: AuthUser) {
   const userRole = authUser.role;
   const userName = authUser.name.trim();
+  const payload = normalizeLeadPayload(body);
 
-  let reqPerson = body.requestedPerson || body.requested_person || "";
+  let reqPerson = payload.requestedPerson || "";
   if (userRole === "staff" && userName) {
     reqPerson = userName;
   }
 
   const [result]: any = await db.insert(serviceRequests).values({
-    customerName: body.customerName || body.customer_name || "",
-    contactName: body.contactName || body.contact_name || "",
-    phone: body.phone || "",
-    email: body.email || "",
-    region: body.region || "",
-    address: body.address || "",
-    mapLink: body.mapLink || body.map_link || "",
-    coordinates: body.coordinates || "",
-    source: body.source || "",
-    status: body.status || "New Lead",
-    implementationType: body.implementationType || body.implementation_type || "",
-    salesPerson: body.salesPerson || body.sales_person || "",
-    salesType: body.salesType || body.sales_type || "",
+    customerName: payload.customerName || "",
+    contactName: payload.contactName || "",
+    phone: payload.phone || "",
+    email: payload.email || "",
+    region: payload.region || "",
+    address: payload.address || "",
+    mapLink: payload.mapLink || "",
+    coordinates: payload.coordinates || "",
+    source: payload.source || "",
+    status: payload.status || "New Lead",
+    implementationType: payload.implementationType || "",
+    salesPerson: payload.salesPerson || "",
+    salesType: payload.salesType || "",
     requestedPerson: reqPerson,
-    comment: body.comment || "",
-    projectValue: body.projectValue || body.project_value || "",
-    priceDetails: body.priceDetails || body.price_details || "",
-    accessories: body.accessories || "",
-    newQty: parseInt(body.newQty || body.new_qty || 0),
-    migrateQty: parseInt(body.migrateQty || body.migrate_qty || 0),
-    tradingQty: parseInt(body.tradingQty || body.trading_qty || 0),
-    serviceQty: parseInt(body.serviceQty || body.service_qty || 0),
-    otherQty: parseInt(body.otherQty || body.other_qty || 0),
+    comment: payload.comment || "",
+    projectValue: payload.projectValue || "",
+    priceDetails: payload.priceDetails || "",
+    accessories: payload.accessories || "",
+    newQty: payload.newQty,
+    migrateQty: payload.migrateQty,
+    tradingQty: payload.tradingQty,
+    serviceQty: payload.serviceQty,
+    otherQty: payload.otherQty,
     jobStatus: "Pending",
     createdAt: new Date().toISOString().substring(0, 10),
     createdBy: userName || "guest"
   });
 
   try {
-    await saveLocalSalesplusEntry({ ...body, requestedPerson: reqPerson }, result.insertId, reqPerson);
+    await saveLocalSalesplusEntry({ ...body, ...payload, requestedPerson: reqPerson }, result.insertId, reqPerson);
   } catch (salesplusErr) {
     console.error("Failed to save local Salesplus entry:", salesplusErr);
   }
 
   try {
-    const syncResult = await syncRegistrationCustomer(body, userName || "guest");
+    const syncResult = await syncRegistrationCustomer({ ...body, ...payload }, userName || "guest");
     if (syncResult.action === "created") {
       console.log(`[API Leads/New] Synchronized customer ${syncResult.customerName} into customers table.`);
     } else if (syncResult.action === "updated") {
@@ -264,23 +375,24 @@ export async function createLeadRegistration(body: any, authUser: AuthUser) {
 export async function createServiceTicket(body: any, authUser: AuthUser) {
   const userRole = authUser.role;
   const userName = authUser.name.trim();
+  const payload = normalizeServiceTicketPayload(body);
 
-  let reqPerson = body.requestedPerson || body.requested_person || "";
+  let reqPerson = payload.requestedPerson || "";
   if (userRole === "staff" && userName) {
     reqPerson = userName;
   }
 
   const [result]: any = await db.insert(serviceRequests).values({
-    customerName: body.customerName || body.customer_name || "",
-    issueDescription: body.description || "",
-    jobStatus: body.status || "Pending",
-    newQty: parseInt(body.quantity || 1),
+    customerName: payload.customerName || "",
+    issueDescription: payload.description || "",
+    jobStatus: payload.status || "Pending",
+    newQty: payload.quantity,
     requestedPerson: reqPerson,
-    paymentStatus: body.payment || body.paymentStatus || "",
-    amount: body.amount || "",
-    salesPerson: body.assignee || "",
-    location: body.location || body.region || "",
-    region: body.location || body.region || "",
+    paymentStatus: payload.payment || "",
+    amount: payload.amount || "",
+    salesPerson: payload.assignee || "",
+    location: payload.location || "",
+    region: payload.location || payload.region || "",
     status: "New Lead",
     createdAt: new Date().toISOString().substring(0, 10),
     createdBy: userName || "guest"
@@ -290,36 +402,37 @@ export async function createServiceTicket(body: any, authUser: AuthUser) {
 }
 
 export async function updateLeadRegistration(recordId: number, body: any) {
-  const custName = body.customerName || body.customer_name;
+  const payload = normalizeLeadPayload(body);
+  const custName = payload.customerName;
 
   await db.update(serviceRequests).set({
     customerName: custName,
-    contactName: body.contactName || body.contact_name,
-    phone: body.phone,
-    email: body.email,
-    region: body.region,
-    address: body.address,
-    mapLink: body.mapLink || body.map_link,
-    coordinates: body.coordinates,
-    source: body.source,
-    status: body.status,
-    implementationType: body.implementationType || body.implementation_type,
-    salesPerson: body.salesPerson || body.sales_person,
-    salesType: body.salesType || body.sales_type,
-    requestedPerson: body.requestedPerson || body.requested_person,
-    comment: body.comment,
-    projectValue: body.projectValue || body.project_value,
-    priceDetails: body.priceDetails || body.price_details,
-    accessories: body.accessories,
-    newQty: parseInt(body.newQty || body.new_qty || 0),
-    migrateQty: parseInt(body.migrateQty || body.migrate_qty || 0),
-    tradingQty: parseInt(body.tradingQty || body.trading_qty || 0),
-    serviceQty: parseInt(body.serviceQty || body.service_qty || 0),
-    otherQty: parseInt(body.otherQty || body.other_qty || 0)
+    contactName: payload.contactName,
+    phone: payload.phone,
+    email: payload.email,
+    region: payload.region,
+    address: payload.address,
+    mapLink: payload.mapLink,
+    coordinates: payload.coordinates,
+    source: payload.source,
+    status: payload.status,
+    implementationType: payload.implementationType,
+    salesPerson: payload.salesPerson,
+    salesType: payload.salesType,
+    requestedPerson: payload.requestedPerson,
+    comment: payload.comment,
+    projectValue: payload.projectValue,
+    priceDetails: payload.priceDetails,
+    accessories: payload.accessories,
+    newQty: payload.newQty,
+    migrateQty: payload.migrateQty,
+    tradingQty: payload.tradingQty,
+    serviceQty: payload.serviceQty,
+    otherQty: payload.otherQty
   }).where(eq(serviceRequests.id, recordId));
 
   try {
-    const syncResult = await syncLeadEditCustomer({ ...body, customerName: custName });
+    const syncResult = await syncLeadEditCustomer({ ...body, ...payload, customerName: custName });
     if (syncResult.action === "created") {
       console.log(`[API Leads/Edit] Created synchronized customer ${syncResult.customerName} on lead edit.`);
     } else if (syncResult.action === "updated") {
@@ -335,16 +448,17 @@ export async function deleteLeadRegistration(recordId: number) {
 }
 
 export async function updateServiceTicket(recordId: number, body: any) {
+  const payload = normalizeServiceTicketPayload(body);
   await db.update(serviceRequests).set({
-    customerName: body.customerName,
-    issueDescription: body.description,
-    jobStatus: body.status,
-    newQty: parseInt(body.quantity || 1),
-    requestedPerson: body.requestedPerson,
-    paymentStatus: body.payment,
-    amount: body.amount,
-    salesPerson: body.assignee,
-    location: body.location
+    customerName: payload.customerName,
+    issueDescription: payload.description,
+    jobStatus: payload.status,
+    newQty: payload.quantity,
+    requestedPerson: payload.requestedPerson,
+    paymentStatus: payload.payment,
+    amount: payload.amount,
+    salesPerson: payload.assignee,
+    location: payload.location
   }).where(eq(serviceRequests.id, recordId));
 }
 

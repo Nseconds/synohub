@@ -13,3 +13,12 @@ export function sendSafeQuery(body: unknown) {
     body: JSON.stringify(body),
   });
 }
+
+export function fetchChatHistory(params: { target?: string; aiMode?: string; cacheBust?: number }) {
+  const query = new URLSearchParams();
+  if (params.target) query.set("target", params.target);
+  if (params.aiMode) query.set("aiMode", params.aiMode);
+  if (params.cacheBust) query.set("_", String(params.cacheBust));
+  const queryString = query.toString();
+  return apiRequest(`/api/chat/history${queryString ? `?${queryString}` : ""}`);
+}

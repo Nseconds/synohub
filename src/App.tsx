@@ -2,38 +2,12 @@ import React, { useState, useEffect, useRef } from "react";
 import { LayoutDashboard, Users, ClipboardList as TooltipIcon, MessageSquare, Plus, Search, Send, MapPin, Package, Clock, Phone, Mail, ChevronRight, Activity, Zap, Shield, Database, FileUp, Sparkles, CheckCircle2, Minus, Square, X, ClipboardList, Eye } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "./lib/utils";
-import axios from "axios";
 import { LoginForm } from "./components/LoginForm";
-
-// --- Axios Interceptor for Signed Auth Tokens ---
-axios.interceptors.request.use((config) => {
-  const userStr = localStorage.getItem("synohub-user");
-  if (userStr) {
-    try {
-      const parsed = JSON.parse(userStr);
-      if (parsed.token) {
-        config.headers.Authorization = `Bearer ${parsed.token}`;
-      }
-    } catch (e) {
-      // Ignore
-    }
-  }
-  return config;
-}, (error) => {
-  return Promise.reject(error);
-});
-
-axios.interceptors.response.use((response) => response, (error) => {
-  if (error.response?.status === 401) {
-    try {
-      localStorage.removeItem("synohub-user");
-      window.dispatchEvent(new Event("synohub-auth-expired"));
-    } catch {
-      // Ignore unavailable storage.
-    }
-  }
-  return Promise.reject(error);
-});
+import { createGuestSession } from "./frontend/api/authApi";
+import { fetchChatHistory, sendChatMessage, sendSafeQuery } from "./frontend/api/chatApi";
+import { updateCustomer } from "./frontend/api/customerApi";
+import { fetchDashboardData } from "./frontend/api/dashboardApi";
+import { createLead, createServiceRequest, updateLead, updateServiceRequest } from "./frontend/api/serviceRequestApi";
 
 // --- Types ---
 interface Customer {
@@ -164,7 +138,7 @@ interface Message {
   username?: string;
 }
 
-type SafeQueryAiMode = "gemini" | "local" | "compare" | "nvidia" | "openrouter";
+type SafeQueryAiMode = "gemini" | "local" | "compare" | "nvidia" | "openrouter" | "gpt-oss" | "cohere" | "auto-fallback";
 type CompareProvider = "gemini" | "local" | "nvidia" | "openrouter";
 
 const compareProviderOptions: Array<{ value: CompareProvider; label: string }> = [
@@ -188,6 +162,7 @@ const isSafeQueryMessage = (text: string) => {
   if (/^(show|list|view)$/.test(normalized)) return true;
   if (/\bpending\b/.test(normalized) && /\b(my|list|account|ticket|tickets|request|requests|lead|leads|queue)\b/.test(normalized)) return true;
   if (/\b(pending|open|active|ongoing|unresolved)\b/.test(normalized) && !/\b(create|register|add|new|save|file)\b/.test(normalized)) return true;
+  if (/\b(today|today's|todays)\b/.test(normalized) && /\b(record|records|ticket|tickets|request|requests|lead|leads|job|jobs|task|tasks)\b/.test(normalized)) return true;
   if (/\b(migration|migrations|migrate)\b/.test(normalized) && /\b(show|list|view|get|find|how\s+many|count|total|ticket|tickets|request|requests|job|jobs|task|tasks|there)\b/.test(normalized)) return true;
   if (/\b(find|show|view|get|search)\b/.test(normalized) && /\b(ticket|request)\b.*\b(id|number|#)?\s*\d+\b/.test(normalized)) return true;
   if (/\b(need|needs|requiring|require|requires)\s+attention\b/.test(normalized) || /\battention\s+(ticket|tickets|request|requests|queue)\b/.test(normalized)) return true;
@@ -244,7 +219,8 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
   };
 
   const getModeChatChannel = (mode: SafeQueryAiMode, target = selectedChatTarget) => {
-    return `${getBaseChatChannel(target)}|ai:${mode}`;
+    const channelMode = mode === "gpt-oss" ? "nvidia" : mode === "cohere" ? "openrouter" : mode;
+    return `${getBaseChatChannel(target)}|ai:${channelMode}`;
   };
 
   const filterModeMessages = (items: Message[], mode: SafeQueryAiMode, target: string) => {
@@ -295,12 +271,13 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
     const requestId = historyRequestRef.current + 1;
     historyRequestRef.current = requestId;
     try {
-      const url = role === "admin"
-        ? `/api/chat/history?target=${encodeURIComponent(target)}&aiMode=${encodeURIComponent(mode)}&_=${Date.now()}`
-        : `/api/chat/history?aiMode=${encodeURIComponent(mode)}&_=${Date.now()}`;
-      const res = await axios.get(url);
+      const history = await fetchChatHistory({
+        ...(role === "admin" ? { target } : {}),
+        aiMode: mode,
+        cacheBust: Date.now(),
+      });
       if (historyRequestRef.current !== requestId || activeChatScopeRef.current !== scopeKey) return;
-      setMessages(filterModeMessages(Array.isArray(res.data) ? res.data : [], mode, target));
+      setMessages(filterModeMessages(Array.isArray(history) ? history : [], mode, target));
     } catch (e) {
       console.error("Failed to fetch chat history", e);
     }
@@ -335,22 +312,23 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
       if (!useSafeQuery && currentUser?.role === "admin") {
         payload.selectedChatTarget = selectedChatTarget;
       }
-      const res = await axios.post(useSafeQuery ? "/api/chat/query" : "/api/chat", payload);
+      const res: any = useSafeQuery ? await sendSafeQuery(payload) : await sendChatMessage(payload);
       if (activeChatScopeRef.current !== sendScopeKey) return;
-      setMessages(prev => [...prev, { role: 'assistant', content: res.data.answer || res.data.reply, username: messageChannel }]);
-      if (res.data.savedRecord) {
+      setMessages(prev => [...prev, { role: 'assistant', content: res.answer || res.reply, username: messageChannel }]);
+      if (res.savedRecord) {
         if (onRecordSaved) {
-          onRecordSaved(res.data.savedRecord);
+          onRecordSaved(res.savedRecord);
         }
-        if (res.data.savedRecord.requestedPerson && onNewStaffDetected) {
-          const p = res.data.savedRecord.requestedPerson.trim();
+        if (res.savedRecord.requestedPerson && onNewStaffDetected) {
+          const p = res.savedRecord.requestedPerson.trim();
           const capitalized = p.charAt(0).toUpperCase() + p.slice(1).toLowerCase();
           onNewStaffDetected(capitalized);
         }
       }
     } catch (e) {
       if (activeChatScopeRef.current !== sendScopeKey) return;
-      setMessages(prev => [...prev, { role: 'assistant', content: "I'm experiencing high traffic. Please try again in 30s.", username: messageChannel }]);
+      const errorMessage = (e as any)?.response?.data?.error || (e as Error).message || "I'm experiencing high traffic. Please try again in 30s.";
+      setMessages(prev => [...prev, { role: 'assistant', content: errorMessage, username: messageChannel }]);
     } finally {
       setLoading(false);
     }
@@ -383,22 +361,23 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
       if (!useSafeQuery && currentUser?.role === "admin") {
         payload.selectedChatTarget = selectedChatTarget;
       }
-      const res = await axios.post(useSafeQuery ? "/api/chat/query" : "/api/chat", payload);
+      const res: any = useSafeQuery ? await sendSafeQuery(payload) : await sendChatMessage(payload);
       if (activeChatScopeRef.current !== sendScopeKey) return;
-      setMessages(prev => [...prev, { role: 'assistant', content: res.data.answer || res.data.reply, username: messageChannel }]);
-      if (res.data.savedRecord) {
+      setMessages(prev => [...prev, { role: 'assistant', content: res.answer || res.reply, username: messageChannel }]);
+      if (res.savedRecord) {
         if (onRecordSaved) {
-          onRecordSaved(res.data.savedRecord);
+          onRecordSaved(res.savedRecord);
         }
-        if (res.data.savedRecord.requestedPerson && onNewStaffDetected) {
-          const p = res.data.savedRecord.requestedPerson.trim();
+        if (res.savedRecord.requestedPerson && onNewStaffDetected) {
+          const p = res.savedRecord.requestedPerson.trim();
           const capitalized = p.charAt(0).toUpperCase() + p.slice(1).toLowerCase();
           onNewStaffDetected(capitalized);
         }
       }
     } catch (e) {
       if (activeChatScopeRef.current !== sendScopeKey) return;
-      setMessages(prev => [...prev, { role: 'assistant', content: "I'm experiencing high traffic. Please try again in 30s.", username: messageChannel }]);
+      const errorMessage = (e as any)?.response?.data?.error || (e as Error).message || "I'm experiencing high traffic. Please try again in 30s.";
+      setMessages(prev => [...prev, { role: 'assistant', content: errorMessage, username: messageChannel }]);
     } finally {
       setLoading(false);
     }
@@ -454,9 +433,10 @@ const ChatInterface = ({ onRecordSaved, onNewStaffDetected, forcedInput, onInput
                   className="bg-white border border-zinc-200 rounded px-2 py-1 text-xs text-zinc-800 focus:outline-none focus:border-teal-accent font-medium cursor-pointer"
                 >
                   <option value="gemini">Gemini</option>
+                  <option value="auto-fallback">Auto Fallback</option>
                   <option value="local">Local LLM</option>
-                  <option value="nvidia">GPT OSS 120B</option>
-                  <option value="openrouter">Cohere</option>
+                  <option value="gpt-oss">GPT OSS 120B</option>
+                  <option value="cohere">Cohere</option>
                   <option value="compare">Compare Both</option>
                 </select>
               </div>
@@ -802,11 +782,11 @@ export default function App() {
     try {
       if (activeTab === "existing-form" && selectedLeadId) {
         // Update database with existing lead record
-        await axios.put(`/api/leads/${selectedLeadId}`, leadForm);
+        await updateLead(selectedLeadId, leadForm);
         showToast("Lead configuration updated in database and synchronized with Customers successfully!");
       } else {
         // Create brand-new lead registration in database
-        await axios.post("/api/leads/new", leadForm);
+        await createLead(leadForm);
         showToast("Lead registration created in database and synchronized with Customers successfully!");
       }
       setIsLeadModalOpen(false);
@@ -858,7 +838,7 @@ export default function App() {
   const handleTicketSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await axios.post("/api/services", ticketForm);
+      await createServiceRequest(ticketForm);
       setIsTicketModalOpen(false);
       fetchData();
       showToast(`Service ticket created successfully!`);
@@ -887,25 +867,25 @@ export default function App() {
 
   const fetchData = async () => {
     try {
-      const res = await axios.get("/api/data");
+      const res: any = await fetchDashboardData();
       setData({
-        registrations: res.data && Array.isArray(res.data.registrations) ? res.data.registrations : [],
-        services: res.data && Array.isArray(res.data.services) ? res.data.services : [],
-        customers: res.data && Array.isArray(res.data.customers) ? res.data.customers : []
+        registrations: res && Array.isArray(res.registrations) ? res.registrations : [],
+        services: res && Array.isArray(res.services) ? res.services : [],
+        customers: res && Array.isArray(res.customers) ? res.customers : []
       });
       setDbError(null);
 
       // Extract dynamic requestedPerson and append to listed people if missing
       const dbRequestedPeople = new Set<string>();
-      if (res.data?.registrations && Array.isArray(res.data.registrations)) {
-        res.data.registrations.forEach((r: any) => {
+      if (res?.registrations && Array.isArray(res.registrations)) {
+        res.registrations.forEach((r: any) => {
           if (r?.requestedPerson && r.requestedPerson.trim()) {
             dbRequestedPeople.add(r.requestedPerson.trim());
           }
         });
       }
-      if (res.data?.services && Array.isArray(res.data.services)) {
-        res.data.services.forEach((s: any) => {
+      if (res?.services && Array.isArray(res.services)) {
+        res.services.forEach((s: any) => {
           if (s?.requestedPerson && s.requestedPerson.trim()) {
             dbRequestedPeople.add(s.requestedPerson.trim());
           }
@@ -995,8 +975,8 @@ export default function App() {
           showToast(`Welcome back, ${loggedUser.name}!`);
         }} 
         onProceedAsGuest={async () => {
-          const res = await axios.post("/api/guest-session");
-          const guestUser = { name: res.data.name, role: res.data.role, token: res.data.token };
+          const res: any = await createGuestSession();
+          const guestUser = { name: res.name, role: res.role, token: res.token };
           localStorage.setItem("synohub-user", JSON.stringify(guestUser));
           setUser(guestUser);
           setActiveTab("new-form");
@@ -1023,8 +1003,8 @@ export default function App() {
 
   const handleProceedAsGuestRecovery = async () => {
     try {
-      const res = await axios.post("/api/guest-session");
-      const guestUser = { name: res.data.name, role: res.data.role, token: res.data.token };
+      const res: any = await createGuestSession();
+      const guestUser = { name: res.name, role: res.role, token: res.token };
       localStorage.setItem("synohub-user", JSON.stringify(guestUser));
       setUser(guestUser);
       window.location.reload();
@@ -2669,11 +2649,11 @@ export default function App() {
               if (user?.role !== "admin") return;
               try {
                 if (editingItem.type === 'lead') {
-                  await axios.put(`/api/leads/${editingItem.data.id}`, editingItem.data);
+                  await updateLead(editingItem.data.id, editingItem.data);
                 } else if (editingItem.type === 'service') {
-                  await axios.put(`/api/services/${editingItem.data.id}`, editingItem.data);
+                  await updateServiceRequest(editingItem.data.id, editingItem.data);
                 } else {
-                  await axios.put(`/api/customers/${editingItem.data.id}`, editingItem.data);
+                  await updateCustomer(editingItem.data.id, editingItem.data);
                 }
                 setEditingItem(null);
                 fetchData();

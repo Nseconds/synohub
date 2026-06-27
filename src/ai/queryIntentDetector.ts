@@ -180,7 +180,7 @@ function extractQueryLimit(text: string, fallback = 10): number {
 
 function extractDateRange(text: string): "today" | "this_week" | "this_month" | undefined {
   const normalized = text.toLowerCase();
-  if (/\b(today|today's)\b/.test(normalized)) return "today";
+  if (/\b(today|today's|todays)\b/.test(normalized)) return "today";
   if (/\b(this\s+week|week|weekly)\b/.test(normalized)) return "this_week";
   if (/\b(this\s+month|month|monthly)\b/.test(normalized)) return "this_month";
   return undefined;
@@ -455,6 +455,7 @@ export function detectQueryIntent(text: string): DetectedQueryIntent | null {
   const countOnly = isCountOnlyQuestion(text);
   const hasTicketWord = /\b(ticket|tickets|request|requests|lead|leads|record|records|job|jobs|task|tasks|queue)\b/.test(normalized);
   const hasOpenWord = /\b(pending|open|active|ongoing|unresolved|hold|new)\b/.test(normalized);
+  const hasStatusFilterWord = /\b(completed|closed|won|solved|pending|open|active|ongoing|unresolved|hold|new)\b/.test(normalized);
 
   if (/\bpending\b/.test(normalized) && (
     /\bmy\s+pending\b/.test(normalized) ||
@@ -489,6 +490,14 @@ export function detectQueryIntent(text: string): DetectedQueryIntent | null {
       intent: "getOpenTickets",
       params: { limit: extractQueryLimit(text, 50), countOnly },
       confidence: 0.91,
+    };
+  }
+
+  if (dateRange === "today" && hasTicketWord && !hasStatusFilterWord) {
+    return {
+      intent: "getLatestRequests",
+      params: { limit: extractQueryLimit(text, 50), dateRange: "today", countOnly },
+      confidence: 0.94,
     };
   }
 

@@ -23,8 +23,8 @@ It manages:
 - `src/db/index.ts` - MySQL/Drizzle connection setup.
 - `queryRegistry.ts` - Safe backend query registry. This prevents AI-generated SQL.
 - `prompts.json` - Main AI assistant prompt text.
-- `ai/intentDetector.py` - Local Python intent detector for safe query classification.
-- `ai/local-llm/systemPrompt.txt` - Local LLM behavior prompt.
+- `src/ai/intentDetector.py` - Local Python intent detector for safe query classification.
+- `src/ai/local-llm/systemPrompt.txt` - Local LLM behavior prompt.
 
 ## Database Files
 
@@ -83,8 +83,8 @@ Focus on these files first:
 - `src/db/index.ts`
 - `queryRegistry.ts`
 - `prompts.json`
-- `ai/intentDetector.py`
-- `ai/local-llm/systemPrompt.txt`
+- `src/ai/intentDetector.py`
+- `src/ai/local-llm/systemPrompt.txt`
 - `database_export/synohub_live_project_tables.sql`
 
 After reviewing, explain:

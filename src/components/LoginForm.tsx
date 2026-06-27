@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Shield, Sparkles, User, Lock, Activity, Eye, EyeOff } from "lucide-react";
-import axios from "axios";
+import { login } from "../frontend/api/authApi";
 
 interface LoginFormProps {
   onLoginSuccess: (user: { name: string; role: string; token: string }) => void;
@@ -22,16 +22,13 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onLoginSuccess, onProceedA
     setError(null);
 
     try {
-      const res = await axios.post("/api/login", {
-        username: username.trim(),
-        password: password
-      });
+      const res: any = await login(username.trim(), password);
 
-      if (res.data.success) {
+      if (res.success) {
         onLoginSuccess({
-          name: res.data.name,
-          role: res.data.role,
-          token: res.data.token
+          name: res.name,
+          role: res.role,
+          token: res.token
         });
       }
     } catch (err: any) {

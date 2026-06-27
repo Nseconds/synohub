@@ -102,7 +102,7 @@ export function readLocalLlmPrompt(): string {
   ].join("\n");
 
   try {
-    const localLlmPromptPath = path.join(process.cwd(), "ai", "local-llm", "systemPrompt.txt");
+    const localLlmPromptPath = path.join(process.cwd(), "src", "ai", "local-llm", "systemPrompt.txt");
     if (fs.existsSync(localLlmPromptPath)) {
       const content = fs.readFileSync(localLlmPromptPath, "utf8").trim();
       if (content) return content;
@@ -116,8 +116,12 @@ export function readLocalLlmPrompt(): string {
 
 export function readLocalLlmExamples(): string {
   try {
-    const localLlmExamplesPath = path.join(process.cwd(), "ai", "local-llm", "styleExamples.json");
-    if (!fs.existsSync(localLlmExamplesPath)) return "";
+    const localLlmExamplesPaths = [
+      path.join(process.cwd(), "src", "ai", "local-llm", "examples.txt"),
+      path.join(process.cwd(), "src", "ai", "local-llm", "styleExamples.json"),
+    ];
+    const localLlmExamplesPath = localLlmExamplesPaths.find(candidate => fs.existsSync(candidate));
+    if (!localLlmExamplesPath) return "";
     const examples = JSON.parse(fs.readFileSync(localLlmExamplesPath, "utf8"));
     if (!Array.isArray(examples)) return "";
 
