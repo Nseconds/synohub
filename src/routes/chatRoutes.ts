@@ -2098,6 +2098,7 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Customer: "${s.customerName}" | 
         dbContextStr,
         userRole,
         userName,
+        aiMode,
       });
       const localSystemInstruction = buildLocalLlmSystemInstruction(systemInstruction);
 
