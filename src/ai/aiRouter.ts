@@ -3,7 +3,7 @@ import type { SafeQueryAiMode } from "./chatService";
 export type QueryProviderName = "gemini" | "local" | "nvidia" | "openrouter";
 export type PublicAiProviderMode = "gemini" | "local" | "gpt-oss" | "cohere" | "compare";
 
-export function normalizeQueryAiMode(value: unknown): SafeQueryAiMode {
+export function normalizeQueryAiMode(value: unknown, _authUser?: unknown): SafeQueryAiMode {
   const raw = String(value || process.env.SAFE_QUERY_AI_MODE || "local").toLowerCase();
   if (raw === "extra" || raw === "gemma" || raw === "cohere") return "openrouter";
   if (raw === "gpt-oss" || raw === "gptoss" || raw === "openrouter-primary") return "nvidia";

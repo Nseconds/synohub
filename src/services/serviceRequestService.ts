@@ -3,6 +3,7 @@ import { db } from "../db";
 import { customers, serviceRequests } from "../db/schema";
 import type { AuthUser } from "../auth/users";
 import { saveLocalSalesplusEntry } from "./salesplusService";
+import { syncLeadEditCustomer, syncRegistrationCustomer } from "./customerService";
 
 export interface ForcedServiceRequestFields {
   customerName: string;
@@ -200,4 +201,153 @@ export async function saveForcedServiceRequestFields(
       customerName,
     },
   };
+}
+
+export async function createLeadRegistration(body: any, authUser: AuthUser) {
+  const userRole = authUser.role;
+  const userName = authUser.name.trim();
+
+  let reqPerson = body.requestedPerson || body.requested_person || "";
+  if (userRole === "staff" && userName) {
+    reqPerson = userName;
+  }
+
+  const [result]: any = await db.insert(serviceRequests).values({
+    customerName: body.customerName || body.customer_name || "",
+    contactName: body.contactName || body.contact_name || "",
+    phone: body.phone || "",
+    email: body.email || "",
+    region: body.region || "",
+    address: body.address || "",
+    mapLink: body.mapLink || body.map_link || "",
+    coordinates: body.coordinates || "",
+    source: body.source || "",
+    status: body.status || "New Lead",
+    implementationType: body.implementationType || body.implementation_type || "",
+    salesPerson: body.salesPerson || body.sales_person || "",
+    salesType: body.salesType || body.sales_type || "",
+    requestedPerson: reqPerson,
+    comment: body.comment || "",
+    projectValue: body.projectValue || body.project_value || "",
+    priceDetails: body.priceDetails || body.price_details || "",
+    accessories: body.accessories || "",
+    newQty: parseInt(body.newQty || body.new_qty || 0),
+    migrateQty: parseInt(body.migrateQty || body.migrate_qty || 0),
+    tradingQty: parseInt(body.tradingQty || body.trading_qty || 0),
+    serviceQty: parseInt(body.serviceQty || body.service_qty || 0),
+    otherQty: parseInt(body.otherQty || body.other_qty || 0),
+    jobStatus: "Pending",
+    createdAt: new Date().toISOString().substring(0, 10),
+    createdBy: userName || "guest"
+  });
+
+  try {
+    await saveLocalSalesplusEntry({ ...body, requestedPerson: reqPerson }, result.insertId, reqPerson);
+  } catch (salesplusErr) {
+    console.error("Failed to save local Salesplus entry:", salesplusErr);
+  }
+
+  try {
+    const syncResult = await syncRegistrationCustomer(body, userName || "guest");
+    if (syncResult.action === "created") {
+      console.log(`[API Leads/New] Synchronized customer ${syncResult.customerName} into customers table.`);
+    } else if (syncResult.action === "updated") {
+      console.log(`[API Leads/New] Updated existing customer ${syncResult.customerName} vehicleCount to ${syncResult.vehicleCount}`);
+    }
+  } catch (custErr) {
+    console.error("API failed to sync customer:", custErr);
+  }
+
+  return result;
+}
+
+export async function createServiceTicket(body: any, authUser: AuthUser) {
+  const userRole = authUser.role;
+  const userName = authUser.name.trim();
+
+  let reqPerson = body.requestedPerson || body.requested_person || "";
+  if (userRole === "staff" && userName) {
+    reqPerson = userName;
+  }
+
+  const [result]: any = await db.insert(serviceRequests).values({
+    customerName: body.customerName || body.customer_name || "",
+    issueDescription: body.description || "",
+    jobStatus: body.status || "Pending",
+    newQty: parseInt(body.quantity || 1),
+    requestedPerson: reqPerson,
+    paymentStatus: body.payment || body.paymentStatus || "",
+    amount: body.amount || "",
+    salesPerson: body.assignee || "",
+    location: body.location || body.region || "",
+    region: body.location || body.region || "",
+    status: "New Lead",
+    createdAt: new Date().toISOString().substring(0, 10),
+    createdBy: userName || "guest"
+  });
+
+  return result;
+}
+
+export async function updateLeadRegistration(recordId: number, body: any) {
+  const custName = body.customerName || body.customer_name;
+
+  await db.update(serviceRequests).set({
+    customerName: custName,
+    contactName: body.contactName || body.contact_name,
+    phone: body.phone,
+    email: body.email,
+    region: body.region,
+    address: body.address,
+    mapLink: body.mapLink || body.map_link,
+    coordinates: body.coordinates,
+    source: body.source,
+    status: body.status,
+    implementationType: body.implementationType || body.implementation_type,
+    salesPerson: body.salesPerson || body.sales_person,
+    salesType: body.salesType || body.sales_type,
+    requestedPerson: body.requestedPerson || body.requested_person,
+    comment: body.comment,
+    projectValue: body.projectValue || body.project_value,
+    priceDetails: body.priceDetails || body.price_details,
+    accessories: body.accessories,
+    newQty: parseInt(body.newQty || body.new_qty || 0),
+    migrateQty: parseInt(body.migrateQty || body.migrate_qty || 0),
+    tradingQty: parseInt(body.tradingQty || body.trading_qty || 0),
+    serviceQty: parseInt(body.serviceQty || body.service_qty || 0),
+    otherQty: parseInt(body.otherQty || body.other_qty || 0)
+  }).where(eq(serviceRequests.id, recordId));
+
+  try {
+    const syncResult = await syncLeadEditCustomer({ ...body, customerName: custName });
+    if (syncResult.action === "created") {
+      console.log(`[API Leads/Edit] Created synchronized customer ${syncResult.customerName} on lead edit.`);
+    } else if (syncResult.action === "updated") {
+      console.log(`[API Leads/Edit] Synchronized existing customer ${syncResult.customerName} details.`);
+    }
+  } catch (custErr) {
+    console.error("API failed to sync customer on update:", custErr);
+  }
+}
+
+export async function deleteLeadRegistration(recordId: number) {
+  await db.delete(serviceRequests).where(eq(serviceRequests.id, recordId));
+}
+
+export async function updateServiceTicket(recordId: number, body: any) {
+  await db.update(serviceRequests).set({
+    customerName: body.customerName,
+    issueDescription: body.description,
+    jobStatus: body.status,
+    newQty: parseInt(body.quantity || 1),
+    requestedPerson: body.requestedPerson,
+    paymentStatus: body.payment,
+    amount: body.amount,
+    salesPerson: body.assignee,
+    location: body.location
+  }).where(eq(serviceRequests.id, recordId));
+}
+
+export async function deleteServiceTicket(recordId: number) {
+  await db.delete(serviceRequests).where(eq(serviceRequests.id, recordId));
 }
