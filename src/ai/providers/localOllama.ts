@@ -1,4 +1,5 @@
 import axios from "axios";
+import env from "../../shared/validation/env";
 
 export async function runLocalOllamaChatCompletion(args: {
   localSystemInstruction: string;
@@ -6,24 +7,24 @@ export async function runLocalOllamaChatCompletion(args: {
   message: string;
   fallback?: boolean;
 }): Promise<string> {
-  let ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
+  let ollamaUrl = env.OLLAMA_URL;
   if (!ollamaUrl.endsWith("/api/chat")) {
     ollamaUrl = ollamaUrl.replace(/\/$/, "") + "/api/chat";
   }
 
   const ollamaOptions: any = {
-    num_ctx: Math.max(parseInt(process.env.OLLAMA_NUM_CTX || "4096"), 4096),
-    num_thread: parseInt(process.env.OLLAMA_NUM_THREAD || "6"),
+    num_ctx: Math.max(parseInt(env.OLLAMA_NUM_CTX, 10), 4096),
+    num_thread: parseInt(env.OLLAMA_NUM_THREAD, 10),
   };
 
-  const gpuConfig = parseInt(process.env.OLLAMA_NUM_GPU || "-1");
+  const gpuConfig = parseInt(env.OLLAMA_NUM_GPU, 10);
   ollamaOptions.num_gpu = gpuConfig;
 
   if (gpuConfig !== -1) {
     ollamaOptions.main_gpu = 0;
   }
 
-  const currentOllamaModel = process.env.OLLAMA_MODEL || "qwen2.5:1.5b";
+  const currentOllamaModel = env.OLLAMA_MODEL;
 
   const requestBody = {
     model: currentOllamaModel,
@@ -33,7 +34,7 @@ export async function runLocalOllamaChatCompletion(args: {
       { role: "user", content: args.message },
     ],
     options: ollamaOptions,
-    keep_alive: process.env.OLLAMA_KEEP_ALIVE || "5m",
+    keep_alive: env.OLLAMA_KEEP_ALIVE,
     stream: false,
   };
 

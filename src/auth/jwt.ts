@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import env from "../shared/validation/env";
 import type { AuthUser } from "./users";
 
 function cleanEnvVar(val: string | undefined): string | null {
@@ -10,9 +11,9 @@ function cleanEnvVar(val: string | undefined): string | null {
   return trimmed;
 }
 
-const authSecret = cleanEnvVar(process.env.AUTH_SECRET || process.env.JWT_SECRET) || crypto.randomBytes(32).toString("hex");
+const authSecret = cleanEnvVar(env.AUTH_SECRET || env.JWT_SECRET) || crypto.randomBytes(32).toString("hex");
 
-if (!process.env.AUTH_SECRET && !process.env.JWT_SECRET) {
+if (!env.AUTH_SECRET && !env.JWT_SECRET) {
   console.warn("AUTH_SECRET is not set. Tokens will be invalidated on every server restart.");
 }
 

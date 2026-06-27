@@ -11,6 +11,10 @@ import axios from "axios";
 import crypto from "crypto";
 import { execFile } from "child_process";
 import fs from "fs";
+import env from "../shared/validation/env";
+import { CustomerSchema } from "../shared/validation/customer";
+import { QuerySchema } from "../shared/validation/query";
+import { SaveRecordSchema } from "../shared/validation/saveRecord";
 
 import { GoogleGenAI } from "@google/genai";
 import queryRegistry, { applyRoleScope } from "../ai/queryRegistry";
@@ -109,21 +113,21 @@ function cleanEnvVar(val: string | undefined): string | null {
   return trimmed;
 }
 
-const rawGeminiKey = cleanEnvVar(process.env.GEMINI_API_KEY);
+const rawGeminiKey = cleanEnvVar(env.GEMINI_API_KEY);
 const cleanedGeminiKey = rawGeminiKey?.startsWith("sk-or-") ? null : rawGeminiKey;
-const cleanedOpenRouterKey = cleanEnvVar(process.env.OPENROUTER_API_KEY || process.env.NVIDIA_API_KEY) || (rawGeminiKey?.startsWith("sk-or-") ? rawGeminiKey : null);
-const openRouterBaseUrl = cleanEnvVar(process.env.OPENROUTER_BASE_URL) || "https://openrouter.ai/api/v1";
-const openRouterModel = cleanEnvVar(process.env.OPENROUTER_MODEL || process.env.NVIDIA_MODEL) || "openai/gpt-oss-120b:free";
-const extraLlmModel = cleanEnvVar(process.env.OPENROUTER_COMPARE_MODEL || process.env.EXTRA_LLM_MODEL) || "cohere/north-mini-code:free";
-const extraLlmReasoning = String(process.env.OPENROUTER_COMPARE_REASONING || process.env.EXTRA_LLM_REASONING || "true").toLowerCase() !== "false";
-const geminiModel = cleanEnvVar(process.env.GEMINI_MODEL) || "gemini-3.5-flash";
+const cleanedOpenRouterKey = cleanEnvVar(env.OPENROUTER_API_KEY || env.NVIDIA_API_KEY) || (rawGeminiKey?.startsWith("sk-or-") ? rawGeminiKey : null);
+const openRouterBaseUrl = cleanEnvVar(env.OPENROUTER_BASE_URL) || "https://openrouter.ai/api/v1";
+const openRouterModel = cleanEnvVar(env.OPENROUTER_MODEL || env.NVIDIA_MODEL) || "openai/gpt-oss-120b:free";
+const extraLlmModel = cleanEnvVar(env.OPENROUTER_COMPARE_MODEL || env.EXTRA_LLM_MODEL) || "cohere/north-mini-code:free";
+const extraLlmReasoning = String(env.OPENROUTER_COMPARE_REASONING || env.EXTRA_LLM_REASONING || "true").toLowerCase() !== "false";
+const geminiModel = cleanEnvVar(env.GEMINI_MODEL) || "gemini-3.5-flash";
 const openRouterPrimaryLabel = "GPT OSS 120B";
 const cloudProviderLabel = cleanedGeminiKey ? "Gemini" : openRouterPrimaryLabel;
 console.log("--- Environment Variable Sync Check ---");
-console.log("OLLAMA_URL:", process.env.OLLAMA_URL);
-console.log("OLLAMA_MODEL:", process.env.OLLAMA_MODEL);
-console.log("OLLAMA_NUM_THREAD:", process.env.OLLAMA_NUM_THREAD);
-console.log("OLLAMA_NUM_GPU:", process.env.OLLAMA_NUM_GPU);
+console.log("OLLAMA_URL:", env.OLLAMA_URL);
+console.log("OLLAMA_MODEL:", env.OLLAMA_MODEL);
+console.log("OLLAMA_NUM_THREAD:", env.OLLAMA_NUM_THREAD);
+console.log("OLLAMA_NUM_GPU:", env.OLLAMA_NUM_GPU);
 console.log("GEMINI_API_KEY:", cleanedGeminiKey ? "PRESENT" : "MISSING");
 console.log("GEMINI_MODEL:", geminiModel);
 console.log("OPENROUTER_API_KEY:", cleanedOpenRouterKey ? "PRESENT" : "MISSING");
@@ -1256,7 +1260,12 @@ async function handleAIRecordSave(reply: string, userRole: string = "guest", use
 
   try {
     const rawJson = extractRecordTriggerJson(saveMatch.body);
-    const record = JSON.parse(rawJson);
+    const rawRecord = JSON.parse(rawJson);
+    const parsedRecord = SaveRecordSchema.safeParse(rawRecord);
+    if (!parsedRecord.success) {
+      throw new Error("Invalid SAVE_RECORD payload.");
+    }
+    const record: any = parsedRecord.data;
     console.log(`[AI Auto-Save] Detected record save: ${record.type} by role=${userRole}`);
     
     if (record.type === "registration") {
@@ -1349,7 +1358,7 @@ async function handleAIRecordSave(reply: string, userRole: string = "guest", use
 
 export async function startServer() {
   const app = express();
-  const PORT = parseInt(process.env.PORT || "3000", 10);
+  const PORT = env.PORT;
   const httpServer = createHttpServer(app);
 
   try {
@@ -1549,7 +1558,7 @@ export async function startServer() {
     try {
       const { id } = req.params;
 
-      const b = req.body;
+      const b = CustomerSchema.parse(req.body);
       await db.update(customers).set({
         name: b.name,
         contactName: b.contactName,
@@ -1557,7 +1566,7 @@ export async function startServer() {
         email: b.email,
         region: b.region,
         implementationType: b.implementationType,
-        vehicleCount: parseInt(b.vehicleCount || 0)
+        vehicleCount: b.vehicleCount || 0
       }).where(eq(customers.id, parseInt(id)));
       res.json({ success: true, message: "Customer account updated successfully by Admin" });
     } catch (error) {
@@ -1583,7 +1592,7 @@ export async function startServer() {
       const authUser = getAuthUser(req);
       const userRole = authUser.role;
       const userName = normalizeUserName(authUser.name);
-      const q = req.query.q as string;
+      const { search: q } = QuerySchema.parse(req.query);
       const rawResults = q 
         ? await db.select().from(customers).where(or(like(customers.name, `%${q}%`), like(customers.contactName, `%${q}%`)))
         : await db.select().from(customers);
@@ -2638,24 +2647,24 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Created: "${s.createdAt || ''}" 
 
       // 3. Fall back to Ollama if cloud providers failed or were unavailable
       if (!parsedSuccessfully) {
-        let ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
+        let ollamaUrl = env.OLLAMA_URL;
         if (!ollamaUrl.endsWith("/api/chat")) {
           ollamaUrl = ollamaUrl.replace(/\/$/, "") + "/api/chat";
         }
 
         const ollamaOptions: any = {
-          num_ctx: parseInt(process.env.OLLAMA_NUM_CTX || "2048"),
-          num_thread: parseInt(process.env.OLLAMA_NUM_THREAD || "6"),
+          num_ctx: parseInt(env.OLLAMA_NUM_CTX, 10),
+          num_thread: parseInt(env.OLLAMA_NUM_THREAD, 10),
         };
 
-        const gpuConfig = parseInt(process.env.OLLAMA_NUM_GPU || "-1");
+        const gpuConfig = parseInt(env.OLLAMA_NUM_GPU, 10);
         ollamaOptions.num_gpu = gpuConfig;
         
         if (gpuConfig !== -1) {
           ollamaOptions.main_gpu = 0;
         }
 
-        const currentOllamaModel = process.env.OLLAMA_MODEL || "qwen2.5:1.5b";
+        const currentOllamaModel = env.OLLAMA_MODEL;
 
         console.log(`[AI Ingest] START: model=${currentOllamaModel}, options=${JSON.stringify(ollamaOptions)}`);
         console.log(`[AI Ingest] URL: ${ollamaUrl}`);
@@ -2668,7 +2677,7 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Created: "${s.createdAt || ''}" 
             { role: "user", content: "Extract records from these logs:\n" + batch }
           ],
           options: ollamaOptions,
-          keep_alive: process.env.OLLAMA_KEEP_ALIVE || "5m",
+          keep_alive: env.OLLAMA_KEEP_ALIVE,
           stream: false
         }, { 
           timeout: 300000,
@@ -2769,14 +2778,14 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Created: "${s.createdAt || ''}" 
     
     // Check Ollama status
     try {
-      const ollamaUrl = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+      const ollamaUrl = env.OLLAMA_URL.replace(/\/$/, "");
       const response = await axios.get(`${ollamaUrl}/api/tags`, { timeout: 5000 });
       console.log("Ollama connection: OK");
       console.log("Models available:", response.data.models?.map((m: any) => m.name).join(", "));
     } catch (err) {
       console.warn("Ollama connection: FAILED at startup.");
       console.warn("Error:", (err as Error).message);
-      console.warn("AI features will fallback or return errors until Ollama is reachable at:", process.env.OLLAMA_URL);
+      console.warn("AI features will fallback or return errors until Ollama is reachable at:", env.OLLAMA_URL);
     }
   });
 }

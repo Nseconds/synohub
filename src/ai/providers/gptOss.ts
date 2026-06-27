@@ -1,4 +1,5 @@
 import axios from "axios";
+import env from "../../shared/validation/env";
 
 export interface OpenRouterChatMessage {
   role: "system" | "user" | "assistant";
@@ -45,8 +46,8 @@ export async function runOpenRouterChatCompletion(args: {
     headers: {
       Authorization: `Bearer ${args.apiKey}`,
       "Content-Type": "application/json",
-      "HTTP-Referer": process.env.OPENROUTER_SITE_URL || "http://localhost:3000",
-      "X-Title": process.env.OPENROUTER_APP_NAME || "SynoHub",
+      "HTTP-Referer": env.OPENROUTER_SITE_URL,
+      "X-Title": env.OPENROUTER_APP_NAME,
     },
     validateStatus: () => true,
   });
