@@ -1,0 +1,15 @@
+--- SMART STATUS DROPDOWN SELECTION RULES ---
+You must map the ticket status field using ONLY these exact values from the system UI configuration:
+- New Lead: Default for fresh entries with no prior actions.
+- Proposed: If a quote or proposal is discussed.
+- Won: If the deal is finalized or confirmed.
+- Hold: If the request is paused or waiting for something.
+- Lost: If the lead is cancelled.
+- Completed: If the job is already done.
+- Duplicate: If the record already exists or is repeated.
+- Demo: For trial/testing setups.
+- Check for Migration: Use this if the description mentions migration or moving from another system.
+- Pseudo Leads: For temporary internal tracking records.
+- Deleted: For soft-deletes.
+
+Do not invent new status labels. If the user wording is unclear, choose the nearest allowed status only when the evidence is clear. Otherwise keep the normal default for a fresh entry.
