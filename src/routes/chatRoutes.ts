@@ -2363,6 +2363,25 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Created: "${s.createdAt || ''}" 
         };
       };
 
+      const formatAutoFallbackCompareReply = (compareResult: {
+        reply: string;
+        providers?: Record<string, { reply: string; durationMs: number; error?: string }>;
+        compareProviders?: QueryProviderName[];
+      }): string => {
+        const providers = compareResult.providers || {};
+        const orderedProviders = compareResult.compareProviders || compareProviders;
+        const successful = orderedProviders
+          .map(provider => [provider, providers[provider]] as const)
+          .find(([, result]) => result?.reply && !result.error);
+
+        if (!successful) return compareResult.reply;
+
+        const [provider, result] = successful;
+        return provider === "local"
+          ? formatLocalCompareReply(result.reply)
+          : formatCompareChatReply(result.reply);
+      };
+
       if (aiMode === "compare") {
         const compareResult = await runCompareChatReply();
         await saveChatMessage("assistant", compareResult.reply, chatChannel);
@@ -2412,7 +2431,7 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Created: "${s.createdAt || ''}" 
         const fallbackSequence = [
           { key: "gemini", label: "Gemini", call: runGeminiChatReply },
           { key: "gpt-oss", label: openRouterPrimaryLabel, call: runNvidiaChatReply },
-          { key: "compare", label: "Compare Both", call: runCompareChatReply },
+          { key: "cohere", label: "Cohere", call: runExtraChatReply },
           { key: "local", label: "Local LLM", call: () => runLocalChatReply(true) },
         ] as const;
 
@@ -2434,12 +2453,14 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Created: "${s.createdAt || ''}" 
           }
         }
 
-        throw new Error("All AI providers failed. Gemini, GPT OSS, Compare mode, and Local LLM were unavailable. Please check API keys, network access, and Ollama status.");
+        throw new Error("All AI providers failed. Gemini, GPT OSS, Cohere, and Local LLM were unavailable. Please check API keys, network access, and Ollama status.");
       };
 
       if (aiMode === "auto-fallback") {
         const fallbackResult = await callAiWithFallback();
-        reply = fallbackResult.reply;
+        reply = selectedProvider === "compare"
+          ? formatAutoFallbackCompareReply(fallbackResult)
+          : fallbackResult.reply;
       } else {
         const manualResult = await callManualProvider();
         reply = manualResult.reply;
@@ -2451,8 +2472,8 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Created: "${s.createdAt || ''}" 
       if (aiMode === "auto-fallback" && fallbackUsed && selectedProvider) {
         const providerLabel = selectedProvider === "gpt-oss"
           ? openRouterPrimaryLabel
-          : selectedProvider === "compare"
-            ? "Compare Both"
+          : selectedProvider === "cohere"
+            ? "Cohere"
             : selectedProvider === "local"
               ? "Local LLM"
               : "Gemini";

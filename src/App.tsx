@@ -2,12 +2,15 @@ import React, { useState, useEffect, useRef } from "react";
 import { LayoutDashboard, Users, ClipboardList as TooltipIcon, MessageSquare, Plus, Search, Send, MapPin, Package, Clock, Phone, Mail, ChevronRight, Activity, Zap, Shield, Database, FileUp, Sparkles, CheckCircle2, Minus, Square, X, ClipboardList, Eye } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "./lib/utils";
-import { LoginForm } from "./components/LoginForm";
 import { createGuestSession } from "./frontend/api/authApi";
 import { fetchChatHistory, sendChatMessage, sendSafeQuery } from "./frontend/api/chatApi";
 import { updateCustomer } from "./frontend/api/customerApi";
 import { fetchDashboardData } from "./frontend/api/dashboardApi";
 import { createLead, createServiceRequest, updateLead, updateServiceRequest } from "./frontend/api/serviceRequestApi";
+import { AppLayout } from "./frontend/components/AppLayout";
+import { Header } from "./frontend/components/Header";
+import { Sidebar } from "./frontend/components/Sidebar";
+import { LoginPage } from "./frontend/pages/LoginPage";
 
 // --- Types ---
 interface Customer {
@@ -162,7 +165,7 @@ const isSafeQueryMessage = (text: string) => {
   if (/^(show|list|view)$/.test(normalized)) return true;
   if (/\bpending\b/.test(normalized) && /\b(my|list|account|ticket|tickets|request|requests|lead|leads|queue)\b/.test(normalized)) return true;
   if (/\b(pending|open|active|ongoing|unresolved)\b/.test(normalized) && !/\b(create|register|add|new|save|file)\b/.test(normalized)) return true;
-  if (/\b(today|today's|todays)\b/.test(normalized) && /\b(record|records|ticket|tickets|request|requests|lead|leads|job|jobs|task|tasks)\b/.test(normalized)) return true;
+  if (/\b(today|today's|todays)\b/.test(normalized) && /\b(record|records|ticket|tickets|request|requests|lead|leads|job|jobs|task|tasks|work|worklist)\b/.test(normalized)) return true;
   if (/\b(migration|migrations|migrate)\b/.test(normalized) && /\b(show|list|view|get|find|how\s+many|count|total|ticket|tickets|request|requests|job|jobs|task|tasks|there)\b/.test(normalized)) return true;
   if (/\b(find|show|view|get|search)\b/.test(normalized) && /\b(ticket|request)\b.*\b(id|number|#)?\s*\d+\b/.test(normalized)) return true;
   if (/\b(need|needs|requiring|require|requires)\s+attention\b/.test(normalized) || /\battention\s+(ticket|tickets|request|requests|queue)\b/.test(normalized)) return true;
@@ -963,7 +966,7 @@ export default function App() {
 
   if (!user) {
     return (
-      <LoginForm 
+      <LoginPage
         onLoginSuccess={(loggedUser) => {
           localStorage.setItem("synohub-user", JSON.stringify(loggedUser));
           setUser(loggedUser);
@@ -1014,7 +1017,7 @@ export default function App() {
   };
 
   const errorFallback = (
-    <LoginForm 
+    <LoginPage
       onLoginSuccess={handleLoginSuccessRecovery}
       onProceedAsGuest={handleProceedAsGuestRecovery}
     />
@@ -1022,137 +1025,55 @@ export default function App() {
 
   return (
     <AppBoundary fallback={errorFallback}>
-      <div className="flex h-screen bg-[#F8FAFC] text-zinc-700 font-sans selection:bg-[#00ADC6]/20 relative">
-      {/* Toast Notification Container */}
-      <AnimatePresence>
-        {notification && (
-          <motion.div
-            initial={{ opacity: 0, y: -25, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -25, scale: 0.98 }}
-            className={cn(
-              "fixed top-6 right-6 z-50 flex items-center gap-3 px-5 py-3.5 rounded-xl shadow-2xl border text-xs font-semibold backdrop-blur-md max-w-md",
-              notification.type === "success" 
-                ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-600" 
-                : "bg-rose-500/10 border-rose-500/20 text-rose-600"
-            )}
-          >
-            <CheckCircle2 size={16} className={cn(notification.type === "success" ? "text-emerald-500" : "text-rose-500")} />
-            <span>{notification.message}</span>
-            <button onClick={() => setNotification(null)} className="ml-3 hover:opacity-75 transition-opacity text-zinc-400">
-              <X size={14} />
-            </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Sidebar */}
-      <aside className="w-64 border-r border-zinc-200 bg-white flex flex-col pt-8 shadow-sm z-30">
-        <div className="px-8 mb-10 group cursor-pointer">
-          <div className="flex items-center gap-3">
-             <div className="w-9 h-9 rounded-lg bg-teal-accent flex items-center justify-center shadow-lg shadow-teal-accent/20 transition-transform group-hover:scale-105">
-               <Shield className="text-white" strokeWidth={2.5} size={18} />
-             </div>
-             <div>
-               <h1 className="text-zinc-900 font-bold tracking-tight text-lg">SynoHub</h1>
-               <p className="text-[10px] text-zinc-400 font-bold uppercase tracking-widest">Fleet Intelligence</p>
-             </div>
-          </div>
-        </div>
-
-        <nav className="flex-1 px-4 space-y-0.5">
-          {navItems.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => {
-                setActiveTab(item.id);
-                setFilterStatus("All");
-                setFilterRegion("All");
-              }}
-              className={cn(
-                "w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-xs font-bold transition-all",
-                activeTab === item.id 
-                  ? "bg-teal-accent text-white shadow-md shadow-teal-accent/20" 
-                  : "text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100"
-              )}
-            >
-              <item.icon size={16} className={cn(activeTab === item.id ? "text-white" : "text-zinc-400")} />
-              {item.label}
-            </button>
-          ))}
-        </nav>
-
-        {user && (
-          <div className="px-6 pb-2">
-            <div className="bg-zinc-50 rounded-xl p-3 border border-zinc-100 flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <div className="flex flex-col">
-                  <span className="text-[11px] font-bold text-zinc-900 truncate max-w-[125px]" title={user.name}>
-                    {user.name}
-                  </span>
-                  <span className={cn(
-                    "text-[9px] font-mono tracking-wider uppercase px-1.5 py-0.5 rounded w-max mt-0.5",
-                    user.role === "admin" ? "bg-rose-50 border border-rose-100 text-rose-600" :
-                    user.role === "staff" ? "bg-teal-50 border border-teal-100 text-teal-600" : "bg-zinc-100 border border-zinc-200 text-zinc-600"
-                  )}>
-                    {user.role}
-                  </span>
-                </div>
-                <button
-                  onClick={() => {
-                    localStorage.removeItem("synohub-user");
-                    setUser(null);
-                    showToast("Signed out successfully");
-                  }}
-                  className="text-[10px] text-zinc-400 hover:text-rose-500 font-bold uppercase tracking-wider pl-2 transition-colors cursor-pointer"
-                  title="Sign Out"
-                >
-                  Exit
+      <AppLayout
+        notification={
+          <AnimatePresence>
+            {notification && (
+              <motion.div
+                initial={{ opacity: 0, y: -25, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -25, scale: 0.98 }}
+                className={cn(
+                  "fixed top-6 right-6 z-50 flex items-center gap-3 px-5 py-3.5 rounded-xl shadow-2xl border text-xs font-semibold backdrop-blur-md max-w-md",
+                  notification.type === "success"
+                    ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-600"
+                    : "bg-rose-500/10 border-rose-500/20 text-rose-600"
+                )}
+              >
+                <CheckCircle2 size={16} className={cn(notification.type === "success" ? "text-emerald-500" : "text-rose-500")} />
+                <span>{notification.message}</span>
+                <button onClick={() => setNotification(null)} className="ml-3 hover:opacity-75 transition-opacity text-zinc-400">
+                  <X size={14} />
                 </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        <div className="p-6">
-           <div className="bg-zinc-50 rounded-xl p-4 border border-zinc-100">
-              <div className="flex items-center gap-2 mb-2">
-                 <div className="w-1.5 h-1.5 rounded-full bg-teal-accent animate-pulse" />
-                 <span className="text-[9px] text-zinc-500 font-bold uppercase tracking-widest">v2.4 Stable</span>
-              </div>
-              <p className="text-[10px] text-zinc-500 leading-tight">All systems operational.</p>
-           </div>
-        </div>
-      </aside>
-
-      {/* Main Content */}
-      <main className="flex-1 overflow-y-auto relative flex flex-col">
-        <header className="sticky top-0 z-20 bg-white/80 backdrop-blur-md border-b border-zinc-200 px-10 py-6 flex items-center justify-between shadow-sm">
-            <div>
-              <h2 className="text-lg font-bold text-zinc-900 capitalize tracking-tight flex items-center gap-3">
-                {activeTab}
-                <span className="h-4 w-px bg-zinc-200" />
-                <span className="text-[10px] text-zinc-400 font-medium">Synced {new Date().toLocaleTimeString()}</span>
-              </h2>
-            </div>
-            <div className="flex items-center gap-4">
-               <div className="relative">
-                 <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
-                 <input 
-                   type="text" 
-                   placeholder="Global Search..." 
-                   value={searchTerm}
-                   onChange={(e) => setSearchTerm(e.target.value)}
-                   className="bg-zinc-50 border border-zinc-200 rounded-lg py-2 pl-9 pr-4 text-[11px] font-medium focus:outline-none focus:border-teal-accent/30 transition-all w-72"
-                 />
-               </div>
-               <div className="flex items-center gap-2 border-l border-zinc-200 pl-4 ml-2">
-                  <div className="w-8 h-8 rounded-full bg-zinc-100 border border-zinc-200" />
-               </div>
-            </div>
-        </header>
-
-        <div className="p-10 flex-1">
+              </motion.div>
+            )}
+          </AnimatePresence>
+        }
+        sidebar={
+          <Sidebar
+            activeTab={activeTab}
+            navItems={navItems}
+            user={user}
+            onNavigate={(tabId) => {
+              setActiveTab(tabId);
+              setFilterStatus("All");
+              setFilterRegion("All");
+            }}
+            onLogout={() => {
+              localStorage.removeItem("synohub-user");
+              setUser(null);
+              showToast("Signed out successfully");
+            }}
+          />
+        }
+        header={
+          <Header
+            activeTab={activeTab}
+            searchTerm={searchTerm}
+            onSearchChange={setSearchTerm}
+          />
+        }
+      >
           <AnimatePresence mode="wait">
             {/* Lead Creation Modal */}
             <Modal isOpen={isLeadModalOpen} onClose={() => setIsLeadModalOpen(false)} title="Register New Lead">
@@ -2623,8 +2544,7 @@ export default function App() {
 
 
           </AnimatePresence>
-        </div>
-      </main>
+      </AppLayout>
 
       {/* Visual Edit Modal */}
       {editingItem && (
@@ -2868,7 +2788,6 @@ export default function App() {
         </div>
       )}
 
-    </div>
   </AppBoundary>
   );
 }
