@@ -1,0 +1,2 @@
+Guest may create records and view only records created by their own guest account.
+Guest cannot view all records, dashboard summaries, staff data, or database summaries.

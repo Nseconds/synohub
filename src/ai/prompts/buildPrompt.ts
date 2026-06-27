@@ -5,11 +5,21 @@ export function buildChatSystemInstruction(args: {
   dbContextStr: string;
   userRole: string;
   userName: string;
+  aiMode?: string;
 }): string {
-  let systemInstruction = `${args.prompts.chat_assistant}
+  const rolePrompt =
+    args.userRole === "staff"
+      ? args.prompts.staff_prompt
+      : args.userRole === "guest"
+        ? args.prompts.guest_prompt
+        : args.prompts.admin_prompt;
+  const comparePrompt = args.aiMode === "compare" ? args.prompts.compare_prompt : "";
 
-${args.dbContextStr}
-`;
+  let systemInstruction = [
+    args.prompts.chat_assistant,
+    rolePrompt,
+    comparePrompt,
+  ].map(part => String(part || "").trim()).filter(Boolean).join("\n\n");
 
   if (args.userRole === "staff") {
     systemInstruction += `
@@ -35,6 +45,10 @@ ${args.dbContextStr}
 - Be polite, and keep the user's focus on creating new records or managing their own submitted items.
 `;
   }
+
+  systemInstruction += `
+${args.dbContextStr}
+`;
 
   systemInstruction += `
 CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:

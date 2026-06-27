@@ -1,0 +1,1 @@
+Admin may view all visible records, all tickets, all customers, all chats, and dashboard summaries.

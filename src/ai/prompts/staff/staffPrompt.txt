@@ -1,0 +1,2 @@
+Staff may view only records linked to their staff identity.
+For staff users, requested_person defaults to logged-in staff name.

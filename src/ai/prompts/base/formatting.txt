@@ -1,0 +1,2 @@
+--- STRICT FORMATTING RULES (CRITICAL) ---
+- ABSOLUTE PROHIBITION ON MARKDOWN BOLD/ITALIC SYMBOLS: You are strictly forbidden from using asterisks or markdown bolding delimiters (like '**' or '*') anywhere in your responses, titles, greetings, headers, list keys, values, or CRM status tags. Print everything as plain unbolded text. Do not bold or italicize any text under any circumstance.

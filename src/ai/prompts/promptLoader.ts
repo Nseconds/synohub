@@ -4,15 +4,42 @@ import path from "path";
 export interface SynoHubPrompts {
   chat_assistant: string;
   log_extractor: string;
+  base_prompt: string;
+  admin_prompt: string;
+  staff_prompt: string;
+  guest_prompt: string;
+  compare_prompt: string;
   [key: string]: string;
 }
 
 export const defaultPrompts: SynoHubPrompts = {
   chat_assistant: "You are a SynoHub Assistant for Synosys, a fleet management SaaS company in the UAE. Assist users with CRM queries, service tickets, and registrations.",
   log_extractor: "You are a professional data extractor for Synosys Fleet CRM. Return ONLY a JSON array of extracted records.",
+  base_prompt: "",
+  admin_prompt: "",
+  staff_prompt: "",
+  guest_prompt: "",
+  compare_prompt: "",
 };
 
-export function loadPrompts(): SynoHubPrompts {
+const modularPromptFiles = {
+  base: [
+    "base/identity.txt",
+    "base/scope.txt",
+    "base/formatting.txt",
+    "base/analytics.txt",
+    "base/saveRecord.txt",
+    "base/customerMatching.txt",
+    "base/statuses.txt",
+    "base/greetings.txt",
+  ],
+  admin: ["admin/adminPrompt.txt"],
+  staff: ["staff/staffPrompt.txt"],
+  guest: ["guest/guestPrompt.txt"],
+  compare: ["compare/comparePrompt.txt"],
+};
+
+function loadPromptsJson(): SynoHubPrompts {
   const promptsPath = path.join(process.cwd(), "prompts.json");
 
   try {
@@ -22,6 +49,48 @@ export function loadPrompts(): SynoHubPrompts {
   } catch (err) {
     console.error("Failed to load prompts.json, using defaults.", err);
     return { ...defaultPrompts };
+  }
+}
+
+function readPromptFile(promptsDir: string, relativePath: string): string {
+  const filePath = path.join(promptsDir, relativePath);
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Missing modular prompt file: ${relativePath}`);
+  }
+  return fs.readFileSync(filePath, "utf8").trim();
+}
+
+function joinPromptParts(parts: string[]): string {
+  return parts.map(part => part.trim()).filter(Boolean).join("\n\n");
+}
+
+function loadModularPrompts(promptsJson: SynoHubPrompts): SynoHubPrompts {
+  const promptsDir = path.join(process.cwd(), "src", "ai", "prompts");
+  const basePrompt = joinPromptParts(modularPromptFiles.base.map(file => readPromptFile(promptsDir, file)));
+  const adminPrompt = joinPromptParts(modularPromptFiles.admin.map(file => readPromptFile(promptsDir, file)));
+  const staffPrompt = joinPromptParts(modularPromptFiles.staff.map(file => readPromptFile(promptsDir, file)));
+  const guestPrompt = joinPromptParts(modularPromptFiles.guest.map(file => readPromptFile(promptsDir, file)));
+  const comparePrompt = joinPromptParts(modularPromptFiles.compare.map(file => readPromptFile(promptsDir, file)));
+
+  return {
+    ...defaultPrompts,
+    ...promptsJson,
+    chat_assistant: basePrompt || promptsJson.chat_assistant || defaultPrompts.chat_assistant,
+    base_prompt: basePrompt,
+    admin_prompt: adminPrompt,
+    staff_prompt: staffPrompt,
+    guest_prompt: guestPrompt,
+    compare_prompt: comparePrompt,
+  };
+}
+
+export function loadPrompts(): SynoHubPrompts {
+  const promptsJson = loadPromptsJson();
+  try {
+    return loadModularPrompts(promptsJson);
+  } catch (err) {
+    console.error("Failed to load modular prompt files, falling back to prompts.json.", err);
+    return promptsJson;
   }
 }
 

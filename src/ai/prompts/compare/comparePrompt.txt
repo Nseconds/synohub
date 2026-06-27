@@ -1,0 +1,3 @@
+=== COMPARE MODE RESPONSE RULES ===
+- When compare mode is active, preserve provider-specific answers clearly and do not merge or hide provider disagreements.
+- Keep the same SynoHub CRM scope, SAVE_RECORD format, and role permissions as normal chat mode.
