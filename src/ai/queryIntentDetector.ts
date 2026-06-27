@@ -453,7 +453,7 @@ export function detectQueryIntent(text: string): DetectedQueryIntent | null {
   const issueValue = extractIssueSearchValue(text);
   const dateRange = extractDateRange(text);
   const countOnly = isCountOnlyQuestion(text);
-  const hasTicketWord = /\b(ticket|tickets|request|requests|lead|leads|record|records|job|jobs|task|tasks|queue)\b/.test(normalized);
+  const hasTicketWord = /\b(ticket|tickets|request|requests|lead|leads|record|records|job|jobs|task|tasks|queue|work|worklist)\b/.test(normalized);
   const hasOpenWord = /\b(pending|open|active|ongoing|unresolved|hold|new)\b/.test(normalized);
   const hasStatusFilterWord = /\b(completed|closed|won|solved|pending|open|active|ongoing|unresolved|hold|new)\b/.test(normalized);
 
@@ -485,7 +485,7 @@ export function detectQueryIntent(text: string): DetectedQueryIntent | null {
     };
   }
 
-  if (/\btoday'?s?\s+jobs?\b/.test(normalized) && /\b(all\s+)?technicians?\b/.test(normalized)) {
+  if (/\btoday'?s?\s+(jobs?|work|worklist)\b/.test(normalized) && /\b(all\s+)?technicians?\b/.test(normalized)) {
     return {
       intent: "getOpenTickets",
       params: { limit: extractQueryLimit(text, 50), countOnly },
@@ -496,7 +496,7 @@ export function detectQueryIntent(text: string): DetectedQueryIntent | null {
   if (dateRange === "today" && hasTicketWord && !hasStatusFilterWord) {
     return {
       intent: "getLatestRequests",
-      params: { limit: extractQueryLimit(text, 50), dateRange: "today", countOnly },
+      params: { limit: extractQueryLimit(text, 10), dateRange: "today", countOnly },
       confidence: 0.94,
     };
   }

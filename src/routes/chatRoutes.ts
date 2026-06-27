@@ -2146,6 +2146,12 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Created: "${s.createdAt || ''}" 
 
       const sanitizedChatHistory = () => sanitizeProviderChatHistory(chatHistory);
 
+      if (isSimpleGreetingMessage(message)) {
+        const reply = cleanVisibleAssistantText(formatOperationalGreeting(userName, fetchedRequests));
+        await saveChatMessage("assistant", reply, chatChannel);
+        return res.json({ reply });
+      }
+
       const formatLocalCompareReply = (text: string): string => {
         const cleaned = applyStaffRequestedPersonDefault(formatCompareChatReply(text), userRole, userName);
         const templateDraft = formatServiceTemplateDraft(message);
@@ -2211,13 +2217,6 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Created: "${s.createdAt || ''}" 
           } catch (queryErr) {
             console.warn("Local deterministic query fallback failed:", (queryErr as Error).message);
           }
-        }
-
-        if (isSimpleGreetingMessage(message)) {
-          return {
-            reply: formatOperationalGreeting(userName, fetchedRequests),
-            durationMs: Date.now() - startTime,
-          };
         }
 
         try {

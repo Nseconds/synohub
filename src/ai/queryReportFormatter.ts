@@ -161,7 +161,7 @@ export function formatQueueReport(rows: any[], title = "active service queue", o
 }
 
 export function isSimpleGreetingMessage(text: string): boolean {
-  return /^(hi|hello|hey|hai|hii|good\s+morning|good\s+afternoon|good\s+evening)\s*[!.?]*$/i.test(String(text || "").trim());
+  return /^(h|hi|hello|hey|hai|hii|good\s+morning|good\s+afternoon|good\s+evening)\s*[!.?]*$/i.test(String(text || "").trim());
 }
 
 export function formatOperationalGreeting(userName: string, rows: any[]): string {

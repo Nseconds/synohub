@@ -24,6 +24,8 @@ export function stripRecordTriggers(text: string): string {
 export function formatCompareChatReply(text: string): string {
   return stripRecordTriggers(text)
     .replace(/^\s*Assistant:\s*/i, "")
+    .replace(/\n+\s*Example\s+\d+\s+input:\s*[\s\S]*$/i, "")
+    .replace(/\n+\s*Example\s+\d+\s+good reply:\s*[\s\S]*$/i, "")
     .replace(/^.*\b(?:saving|save|created successfully|registered successfully)\b.*$/gim, "")
     .replace(/\*\*([^*]+)\*\*/g, "$1")
     .replace(/\*([^*\n:]+)\*:/g, "$1:")
@@ -35,6 +37,8 @@ export function formatCompareChatReply(text: string): string {
 export function cleanLocalChatReply(text: string): string {
   return text
     .replace(/^\s*Assistant:\s*/i, "")
+    .replace(/\n+\s*Example\s+\d+\s+input:\s*[\s\S]*$/i, "")
+    .replace(/\n+\s*Example\s+\d+\s+good reply:\s*[\s\S]*$/i, "")
     .replace(/\*\*([^*]+)\*\*/g, "$1")
     .replace(/\*([^*\n:]+)\*:/g, "$1:")
     .replace(/\*/g, "")
