@@ -186,6 +186,20 @@ function formatGenericTicketCreationPrompt(userRole: string, userName: string): 
   return lines.join("\n");
 }
 
+function normalizeChatLookupText(input: string): string {
+  return String(input || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/\b(recrds|recrd|reocrds|recrods|recods)\b/g, "records")
+    .replace(/\b(reqsts|reqs)\b/g, "requests")
+    .trim();
+}
+
+function isIdentityLookupMessage(input: string): boolean {
+  const normalized = normalizeChatLookupText(input);
+  return /\b(who\s+am\s+i|who\s+i\s+am|what\s+is\s+my\s+(name|role)|my\s+login|my\s+account)\b/.test(normalized);
+}
+
 const configuredAdminPassword = cleanEnvVar(process.env.ADMIN_PASSWORD) || "admin";
 const configuredStaffPassword = cleanEnvVar(process.env.STAFF_PASSWORD) || "staff123";
 const devAdminPassword = null;
@@ -1816,6 +1830,15 @@ export async function startServer() {
         return res.json({ reply });
       }
 
+      if (isIdentityLookupMessage(message)) {
+        const roleLabel = userRole ? userRole.charAt(0).toUpperCase() + userRole.slice(1) : "User";
+        const reply = cleanVisibleAssistantText(userName
+          ? `You are signed in as ${userName} (${roleLabel}).`
+          : `You are signed in as ${roleLabel}.`);
+        await saveChatMessage("assistant", reply, chatChannel);
+        return res.json({ reply });
+      }
+
       if (isGenericTicketCreationPrompt(message)) {
         const reply = cleanVisibleAssistantText(formatGenericTicketCreationPrompt(userRole, userName));
         await saveChatMessage("assistant", reply, chatChannel);
@@ -1877,7 +1900,7 @@ export async function startServer() {
 
       // Staff security rules check
       if (userRole === "staff") {
-        const normalized = message.toLowerCase().trim();
+        const normalized = normalizeChatLookupText(message);
         const isPendingLookup =
           /\b(my\s+)?pending\s+(request|requests|ticket|tickets|lead|leads)\b/.test(normalized) ||
           /\b(open|ongoing|hold)\s+(request|requests|ticket|tickets|lead|leads)\b/.test(normalized) ||
@@ -1885,7 +1908,9 @@ export async function startServer() {
           normalized === "pending requests please";
         const isLatestRecordsLookup =
           /\b(latest|last|recent)\s+(\d+\s+)?(record|records|request|requests|ticket|tickets|lead|leads)\b/.test(normalized) ||
-          /\b(show|list|view)\s+(my\s+)?(latest|last|recent)\b/.test(normalized);
+          /\b(show|list|view)\s+(my\s+)?(latest|last|recent)\b/.test(normalized) ||
+          /\b(get|show|list|view)\s+(my\s+)?(record|records|request|requests|ticket|tickets|lead|leads|job|jobs|task|tasks|work)\b/.test(normalized) ||
+          /\bmy\s+(record|records|request|requests|ticket|tickets|lead|leads|job|jobs|task|tasks|work)\b/.test(normalized);
 
         const attemptedBlockedAction = 
           normalized.includes("edit ticket") ||
@@ -2460,6 +2485,9 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Created: "${s.createdAt || ''}" 
         reply = selectedProvider === "compare"
           ? formatAutoFallbackCompareReply(fallbackResult)
           : fallbackResult.reply;
+        if (/^\s*Compare Both result:/i.test(reply)) {
+          reply = formatAutoFallbackCompareReply(fallbackResult);
+        }
       } else {
         const manualResult = await callManualProvider();
         reply = manualResult.reply;
@@ -2501,7 +2529,7 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Created: "${s.createdAt || ''}" 
         reply: finalReply,
         savedRecord: savedResult.savedRecord,
         ...(selectedProvider ? { selectedProvider } : {}),
-        ...(aiMode === "auto-fallback" ? { fallbackUsed, fallbackAttempts } : {}),
+        ...(aiMode === "auto-fallback" ? { fallbackUsed, fallbackAttemptCount: fallbackAttempts.length } : {}),
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
