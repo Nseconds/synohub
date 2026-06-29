@@ -122,7 +122,16 @@ export function readLocalLlmExamples(): string {
     ];
     const localLlmExamplesPath = localLlmExamplesPaths.find(candidate => fs.existsSync(candidate));
     if (!localLlmExamplesPath) return "";
-    const examples = JSON.parse(fs.readFileSync(localLlmExamplesPath, "utf8"));
+    const content = fs.readFileSync(localLlmExamplesPath, "utf8").trim();
+    if (!content) return "";
+
+    let examples: unknown;
+    try {
+      examples = JSON.parse(content);
+    } catch {
+      return `\n\nLOCAL LLM STYLE EXAMPLES:\n${content}`;
+    }
+
     if (!Array.isArray(examples)) return "";
 
     const lines = examples

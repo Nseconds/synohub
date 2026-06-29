@@ -3,7 +3,8 @@
 This folder controls the Ollama/Qwen Local LLM chat behavior.
 
 - `systemPrompt.txt`: Compact SynoHub operating prompt for the smaller local model.
-- `styleExamples.json`: Short few-shot examples appended to the local prompt.
+- `examples.txt`: Local style examples appended to the local prompt. This can be a JSON array of `{ "input", "output" }` examples or plain text.
+- `styleExamples.json`: Legacy fallback path for JSON few-shot examples.
 
 Gemini still uses `prompts.json`. Local LLM uses these files plus the same live SynoHub database context and role/security rules from `server.ts`.
 
