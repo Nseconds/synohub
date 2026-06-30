@@ -9,25 +9,32 @@ export function extractTemplateField(input: string, labels: string[]): string {
     "Contact Name", "Phone", "Mobile", "Service Type", "Qty", "Plate", "Issue",
     "Location", "Region", "Accessories", "Preferred Date", "Date/Time"
   ];
+  const sortedTemplateFieldLabels = [...templateFieldLabels].sort((a, b) => b.length - a.length);
+  const inlineBreakLabels = sortedTemplateFieldLabels.filter(label => ![
+    "Plate",
+    "Location",
+    "Preferred Date",
+    "Date/Time",
+  ].includes(label));
   let normalizedInput = String(input || "")
     .replace(/[•·]/g, "\n")
     .replace(/([*━]+)\s*([A-Za-z][A-Za-z /-]{1,40})\s*:/g, "\n$2:")
     .replace(/\s+(SERVICE REQUEST|CUSTOMER DETAILS|SERVICE REQUIREMENT|SERVICE DETAILS|PAYMENT DETAILS)\b/gi, "\n$1");
-  for (const label of templateFieldLabels) {
+  for (const label of inlineBreakLabels) {
     const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     normalizedInput = normalizedInput.replace(new RegExp(`\\s+(${escapedLabel})\\s*:`, "gi"), "\n$1:");
   }
   for (const label of labels) {
     const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const linePattern = new RegExp(`^\\s*[*-]?\\s*${escapedLabel}\\s*:\\s*(.+?)\\s*$`, "im");
+    const linePattern = new RegExp(`^\\s*[*-]?\\s*${escapedLabel}\\s*:[^\\S\\r\\n]*([^\\r\\n]*)\\s*$`, "im");
     const lineMatch = normalizedInput.match(linePattern);
-    if (lineMatch?.[1]) {
+    if (lineMatch) {
       return lineMatch[1].replace(/[━*]+/g, " ").replace(/\s+/g, " ").trim();
     }
   }
 
   const escapedLabels = labels.map(label => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const fieldLabels = templateFieldLabels.map(label => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const fieldLabels = sortedTemplateFieldLabels.map(label => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   const sectionLabels = [
     "PAYMENT DETAILS", "SERVICE REQUIREMENT", "SERVICE DETAILS", "CUSTOMER DETAILS", "SERVICE REQUEST"
   ].map(label => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
@@ -51,7 +58,10 @@ export function cleanTemplateValue(value: string): string {
 
 export function cleanCustomerTemplateName(value: string): string {
   const parts = String(value || "").split("|").map(part => cleanTemplateValue(part)).filter(Boolean);
-  const raw = parts.length > 1 ? parts[parts.length - 1] : (parts[0] || value);
+  const nonEmailParts = parts.filter(part => !extractEmail(part));
+  const raw = nonEmailParts.length > 1
+    ? nonEmailParts[nonEmailParts.length - 1]
+    : (nonEmailParts[0] || parts[0] || value);
   const cleaned = cleanTemplateValue(raw)
     .replace(/\bdetails\b$/i, "")
     .replace(/\b(services?|requirement|payment|customer)\s+details\b/i, "")
@@ -72,7 +82,7 @@ function isMissingTemplateValue(value: string): boolean {
 export function parseServiceTemplateRecord(input: string): Record<string, any> | null {
   if (!/\bSERVICE REQUEST\b/i.test(input)) return null;
 
-  const serviceType = cleanTemplateValue(extractTemplateField(input, ["Implementation Type"]));
+  const serviceType = canonicalizeImplementationType(extractTemplateField(input, ["Implementation Type"]));
   const customerName = cleanCustomerTemplateName(extractTemplateField(input, ["Customer Name"]));
   const contactName = cleanContactTemplateName(extractTemplateField(input, ["Contact Person", "Contact Name"]));
   const phone = cleanTemplateValue(extractTemplateField(input, ["Contact Number"]));
@@ -102,9 +112,9 @@ export function parseServiceTemplateRecord(input: string): Record<string, any> |
     customerName,
     contactName,
     phone,
-    email: "",
+    email: extractEmail(input) || "",
     region: location,
-    implementationType: serviceType.toUpperCase(),
+    implementationType: serviceType,
     status: "New Lead",
     salesType: "New",
     requestedPerson,
@@ -120,7 +130,7 @@ export function parseServiceTemplateRecord(input: string): Record<string, any> |
 export function formatServiceTemplateDraft(input: string): string | null {
   if (!/\bSERVICE REQUEST\b/i.test(input)) return null;
 
-  const serviceType = cleanTemplateValue(extractTemplateField(input, ["Implementation Type"])) || "N/A";
+  const serviceType = canonicalizeImplementationType(extractTemplateField(input, ["Implementation Type"])) || "N/A";
   const customerName = cleanCustomerTemplateName(extractTemplateField(input, ["Customer Name"])) || "N/A";
   const contactName = cleanContactTemplateName(extractTemplateField(input, ["Contact Person", "Contact Name"])) || "N/A";
   const phone = cleanTemplateValue(extractTemplateField(input, ["Contact Number"])) || "N/A";
@@ -139,7 +149,7 @@ export function formatServiceTemplateDraft(input: string): string | null {
   return [
     "Extracted service request details:",
     "",
-    `Service Type       : ${serviceType.toUpperCase()}`,
+    `Service Type       : ${serviceType}`,
     `Customer Name      : ${customerName}`,
     `Contact Name       : ${contactName}`,
     `Contact Number     : ${phone}`,
@@ -182,6 +192,27 @@ function canonicalizeLocation(value: string): string {
   });
 }
 
+function canonicalizeImplementationType(value: string): string {
+  const cleaned = cleanTemplateValue(value);
+  const compact = cleaned.toUpperCase().replace(/\s*\+\s*/g, "+").replace(/\s+/g, " ").trim();
+  const noSpace = compact.replace(/\s+/g, "");
+  const knownTypes = [
+    "LOCATOR",
+    "ASATEEL",
+    "LOCATOR+ASATEEL",
+    "SECUREPATH",
+    "LOCATOR+SECUREPATH",
+    "RASID",
+    "SERVICE",
+    "SHAHIN",
+    "SECUREPATH PREMIUM",
+    "LOCATOR+SECUREPATH PREMIUM",
+    "LOCATOR+RASID",
+    "OTHER",
+  ];
+  return knownTypes.find(type => type.replace(/\s+/g, "") === noSpace) || compact || cleaned;
+}
+
 function isStrongServiceRequestText(input: string): boolean {
   const markers = [
     /\bSERVICE\s+REQUEST\b/i,
@@ -213,7 +244,7 @@ export function parseForcedServiceRequest(input: string): ForcedServiceRequestFi
   const amountRaw = cleanTemplateValue(extractTemplateField(input, ["Amount", "Project Value", "Price"]));
   const amount = !amountRaw || /^n\/?a$/i.test(amountRaw) ? "0.00" : amountRaw;
   const paymentStatusRaw = cleanTemplateValue(extractTemplateField(input, ["Payment Status", "Payment"]));
-  const implementationType = cleanTemplateValue(extractTemplateField(input, ["Implementation Type", "Service Type"])) || "Service";
+  const implementationType = canonicalizeImplementationType(extractTemplateField(input, ["Implementation Type", "Service Type"])) || "SERVICE";
   const quantity = parseIntSafe(cleanTemplateValue(extractTemplateField(input, ["Quantity", "Qty"])), 1);
   const vehiclePlate = cleanTemplateValue(extractTemplateField(input, ["Vehicle Plate", "Plate"]));
   const issueDescription = cleanTemplateValue(extractTemplateField(input, ["Description", "Issue", "Service Requirement"])) || implementationType;

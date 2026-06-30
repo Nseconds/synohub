@@ -9,46 +9,50 @@ import { customers, serviceRequests, messages } from "../db/schema";
 import { eq, like, or, desc, and } from "drizzle-orm";
 import axios from "axios";
 import crypto from "crypto";
-import { execFile } from "child_process";
 import fs from "fs";
 import env from "../shared/validation/env";
 import { CustomerSchema } from "../shared/validation/customer";
 import { QuerySchema } from "../shared/validation/query";
-import { SaveRecordSchema } from "../shared/validation/saveRecord";
 
-import { GoogleGenAI } from "@google/genai";
-import queryRegistry, { applyRoleScope } from "../ai/queryRegistry";
 import { getAuthUser, requireAuth, requireRoles } from "../auth/middleware";
 import { issueToken } from "../auth/jwt";
 import { allowedStaff, normalizeUserName, staffRoster, type AuthUser, type UserRole } from "../auth/users";
 import { chatHistoryPredicates, resolveChatIdentity } from "../auth/permissions";
-import { saveLocalSalesplusEntry } from "../services/salesplusService";
 import {
   createLeadRegistration,
   createServiceTicket,
   deleteLeadRegistration,
   deleteServiceTicket,
-  saveForcedServiceRequestFields,
   updateLeadRegistration,
   updateServiceTicket,
-  type ForcedServiceRequestFields,
-  type ForcedServiceRequestResult,
 } from "../services/serviceRequestService";
-import { syncRegistrationCustomer } from "../services/customerService";
 import { getDashboardData } from "../services/dashboardService";
 import { getChatMessagesByPredicate, getRecentChatMessages, saveChatMessage } from "../services/messageService";
 import {
-  runOpenRouterChatCompletion as runOpenRouterProviderChatCompletion,
-  type OpenRouterChatMessage,
-} from "../ai/providers/gptOss";
+  cleanEnvVar,
+  cleanedGeminiKey,
+  cleanedOpenRouterKey,
+  cloudProviderLabel,
+  extraLlmModel,
+  extraLlmReasoning,
+  geminiModel,
+  genAI,
+  openRouterModel,
+  openRouterPrimaryLabel,
+  runOpenRouterChatCompletion,
+} from "../ai/providerConfig";
 import { runGeminiChatCompletion } from "../ai/providers/gemini";
 import { runLocalOllamaChatCompletion } from "../ai/providers/localOllama";
+import { answerRequestedPersonLookup } from "../ai/directLookupAnswers";
+import {
+  handleAIRecordSave,
+  isAcknowledgementOnlyMessage,
+  saveForcedServiceRequestFromMessage,
+} from "../ai/recordSaveHandler";
 import { buildChatSystemInstruction } from "../ai/prompts/buildPrompt";
 import { buildLocalLlmSystemInstruction, loadPrompts } from "../ai/prompts/promptLoader";
-import { extractRecordTriggerJson, findRecordTrigger, removeRecordTrigger } from "../ai/saveRecordParser";
 import {
   formatServiceTemplateDraft,
-  parseForcedServiceRequest,
   parseServiceTemplateRecord,
 } from "../ai/serviceTemplateParser";
 import {
@@ -63,33 +67,32 @@ import {
   extractPhone,
   extractRegionName,
   normalizeQueryText,
-  parseProviderIntent,
   providerToDetected,
   validateQueryIntent,
-  validateQueryParams,
   type DetectedQueryIntent,
   type QueryProviderResult,
   type SafeQueryIntent,
 } from "../ai/queryIntentDetector";
-import { buildIntentDetectorSystemPrompt } from "../ai/intentService";
-import { formatActionIntentAnswer } from "../ai/queryResponseFormatter";
 import {
-  formatIssueSummary,
-  formatOperationalAnswer,
+  formatProviderError,
+  getProviderLabel,
+  isOpenRouterTemporaryAvailabilityError,
+  runGeminiIntentProvider,
+  runIntentDetectorFallback,
+  runLocalIntentProvider,
+  runNvidiaIntentProvider,
+  runOpenRouterIntentProvider,
+} from "../ai/intentProviders";
+import {
+  attachProviderAnswer,
+  canonicalQueryParams,
+  paramsMatch,
+  runDetectedSafeQuery,
+  safeQueryHandlers,
+} from "../ai/safeQueryExecutor";
+import {
   formatOperationalGreeting,
-  formatQueueReport,
-  formatRegionTicketReport,
-  formatServiceTypeReport,
-  formatStaffWorkloadReport,
-  formatStatusLabelReport,
-  formatTicketListReport,
-  formatTicketLookup,
-  formatTopCustomers,
-  getRowAssignee,
-  getRowDescription,
-  humanDateRangeLabel,
   isSimpleGreetingMessage,
-  summarizeRow,
 } from "../ai/queryReportFormatter";
 import {
   applyStaffRequestedPersonDefault,
@@ -102,51 +105,6 @@ import {
 import {
   type SafeQueryAiMode,
 } from "../ai/chatService";
-
-// Helper to safely strip surrounding quotation marks from environment variables
-function cleanEnvVar(val: string | undefined): string | null {
-  if (!val) return null;
-  const trimmed = val.trim();
-  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
-const rawGeminiKey = cleanEnvVar(env.GEMINI_API_KEY);
-const cleanedGeminiKey = rawGeminiKey?.startsWith("sk-or-") ? null : rawGeminiKey;
-const cleanedOpenRouterKey = cleanEnvVar(env.OPENROUTER_API_KEY || env.NVIDIA_API_KEY) || (rawGeminiKey?.startsWith("sk-or-") ? rawGeminiKey : null);
-const openRouterBaseUrl = cleanEnvVar(env.OPENROUTER_BASE_URL) || "https://openrouter.ai/api/v1";
-const openRouterModel = cleanEnvVar(env.OPENROUTER_MODEL || env.NVIDIA_MODEL) || "openai/gpt-oss-120b:free";
-const extraLlmModel = cleanEnvVar(env.OPENROUTER_COMPARE_MODEL || env.EXTRA_LLM_MODEL) || "cohere/north-mini-code:free";
-const extraLlmReasoning = String(env.OPENROUTER_COMPARE_REASONING || env.EXTRA_LLM_REASONING || "true").toLowerCase() !== "false";
-const geminiModel = cleanEnvVar(env.GEMINI_MODEL) || "gemini-3.5-flash";
-const openRouterPrimaryLabel = "GPT OSS 120B";
-const cloudProviderLabel = cleanedGeminiKey ? "Gemini" : openRouterPrimaryLabel;
-console.log("--- Environment Variable Sync Check ---");
-console.log("OLLAMA_URL:", env.OLLAMA_URL);
-console.log("OLLAMA_MODEL:", env.OLLAMA_MODEL);
-console.log("OLLAMA_NUM_THREAD:", env.OLLAMA_NUM_THREAD);
-console.log("OLLAMA_NUM_GPU:", env.OLLAMA_NUM_GPU);
-console.log("GEMINI_API_KEY:", cleanedGeminiKey ? "PRESENT" : "MISSING");
-console.log("GEMINI_MODEL:", geminiModel);
-console.log("OPENROUTER_API_KEY:", cleanedOpenRouterKey ? "PRESENT" : "MISSING");
-console.log("OPENROUTER_MODEL:", openRouterModel);
-console.log("OPENROUTER_COMPARE_MODEL:", extraLlmModel);
-console.log("---------------------------------------");
-
-// Initialize Gemini if key exists
-let genAI: any = null;
-if (cleanedGeminiKey) {
-  genAI = new GoogleGenAI({
-    apiKey: cleanedGeminiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      }
-    }
-  });
-}
 
 // Load prompts
 let prompts = loadPrompts();
@@ -228,349 +186,6 @@ function formatStaffRecordList(title: string, rows: any[]): string {
   }).join("\n\n")}`;
 }
 
-async function classifyActionIntentOnly(): Promise<any[]> {
-  return [];
-}
-
-const safeQueryHandlers: Record<SafeQueryIntent, (params: any) => Promise<any[]>> = {
-  assignTicket: classifyActionIntentOnly,
-  reassignTicket: classifyActionIntentOnly,
-  updateTicketStatus: classifyActionIntentOnly,
-  deleteTicket: classifyActionIntentOnly,
-  cancelTicket: classifyActionIntentOnly,
-  createLead: classifyActionIntentOnly,
-  createServiceRequest: classifyActionIntentOnly,
-  createMigrationTicket: classifyActionIntentOnly,
-  createInstallationTicket: classifyActionIntentOnly,
-  findCustomerByName: queryRegistry.findCustomerByName,
-  findCustomerByPhone: queryRegistry.findCustomerByPhone,
-  findCustomerByEmail: queryRegistry.findCustomerByEmail,
-  getPendingTicketsByStaff: queryRegistry.getPendingTicketsByStaff,
-  getOpenTicketsByRegion: queryRegistry.getOpenTicketsByRegion,
-  getTicketsByStaff: queryRegistry.getTicketsByStaff,
-  getTicketsByRegion: queryRegistry.getTicketsByRegion,
-  getTicketsByServiceType: queryRegistry.getTicketsByServiceType,
-  getPendingTickets: queryRegistry.getPendingTickets,
-  getOpenTickets: queryRegistry.getOpenTickets,
-  getCompletedTickets: queryRegistry.getCompletedTickets,
-  getTicketById: queryRegistry.getTicketById,
-  getTicketsByStatusLabel: queryRegistry.getTicketsByStatusLabel,
-  getCompletedTicketsThisWeek: queryRegistry.getCompletedTicketsThisWeek,
-  getTicketsNeedingAttention: queryRegistry.getTicketsNeedingAttention,
-  getTicketsByCustomer: queryRegistry.getTicketsByCustomer,
-  getOpenTicketsByCustomer: queryRegistry.getOpenTicketsByCustomer,
-  getTicketsByIssue: queryRegistry.getTicketsByIssue,
-  getUnassignedTickets: queryRegistry.getUnassignedTickets,
-  getMostCommonIssues: queryRegistry.getMostCommonIssues,
-  getCustomerWithMostRequests: queryRegistry.getCustomerWithMostRequests,
-  getCustomerHistory: queryRegistry.getCustomerHistory,
-  getCustomerFleetSize: queryRegistry.getCustomerFleetSize,
-  getCustomerRegion: queryRegistry.getCustomerRegion,
-  getTechnicianWorkload: queryRegistry.getTechnicianWorkload,
-  getHighestWorkload: queryRegistry.getHighestWorkload,
-  getLowestWorkload: queryRegistry.getLowestWorkload,
-  getStaffPerformance: queryRegistry.getStaffPerformance,
-  getDuplicateRequests: queryRegistry.getDuplicateRequests,
-  getLatestRequests: queryRegistry.getLatestRequests,
-  getDashboardSummary: queryRegistry.getDashboardSummary,
-  getRegionSummary: queryRegistry.getRegionSummary,
-  getStatusSummary: queryRegistry.getStatusSummary,
-  getDailySummary: queryRegistry.getDailySummary,
-  getMonthlySummary: queryRegistry.getMonthlySummary,
-  getStaffChatHistory: queryRegistry.getStaffChatHistory,
-  getGuestChatHistory: queryRegistry.getGuestChatHistory,
-};
-
-function getProviderLabel(provider: QueryProviderName): string {
-  if (provider === "gemini") return "Gemini";
-  if (provider === "local") return "Local LLM";
-  if (provider === "nvidia") return openRouterPrimaryLabel;
-  return "Cohere";
-}
-
-function isOpenRouterPolicyEndpointError(error: string): boolean {
-  return /No endpoints available matching your guardrail restrictions and data policy|settings\/privacy|status 404/i.test(String(error || ""));
-}
-
-function isOpenRouterTemporaryAvailabilityError(error: string): boolean {
-  return /status 429|Provider returned error|rate.?limit|thrott/i.test(String(error || ""));
-}
-
-function formatProviderError(provider: QueryProviderName, error: string): string {
-  const raw = String(error || "");
-  if (provider === "nvidia" && isOpenRouterPolicyEndpointError(raw)) {
-    return [
-      `${openRouterPrimaryLabel} is unavailable for the current OpenRouter model/account policy.`,
-      `Configured model: ${openRouterModel}`,
-      "OpenRouter did not provide a chat endpoint allowed by your privacy/data policy.",
-      "Use Gemini, Local LLM, or Cohere, or change OpenRouter privacy settings/model.",
-    ].join("\n");
-  }
-  if (provider === "nvidia" && isOpenRouterTemporaryAvailabilityError(raw)) {
-    return [
-      `${openRouterPrimaryLabel} is currently throttled or temporarily unavailable through OpenRouter.`,
-      `Configured model: ${openRouterModel}`,
-      `Use Gemini, Local LLM, or Cohere for now, or try ${openRouterPrimaryLabel} again later.`,
-    ].join("\n");
-  }
-  return cleanVisibleAssistantText(raw);
-}
-
-async function runOpenRouterChatCompletion(args: {
-  messages: OpenRouterChatMessage[];
-  json?: boolean;
-  maxTokens?: number;
-  temperature?: number;
-  model?: string;
-  reasoning?: boolean;
-  reasoningStateKey?: string;
-}): Promise<string> {
-  return runOpenRouterProviderChatCompletion({
-    ...args,
-    apiKey: cleanedOpenRouterKey,
-    baseUrl: openRouterBaseUrl,
-    defaultModel: openRouterModel,
-  });
-}
-
-async function runLocalIntentProvider(message: string): Promise<QueryProviderResult> {
-  const startTime = Date.now();
-  const detectorPath = path.join(process.cwd(), "src", "ai", "intentDetector.py");
-  console.log("[Safe Query] Mode=local, using Python/local intent detector.");
-
-  const deterministic = detectQueryIntent(message);
-  if (deterministic && deterministic.confidence >= 0.9) {
-    return {
-      ...deterministic,
-      durationMs: Date.now() - startTime,
-    };
-  }
-
-  return new Promise((resolve) => {
-    execFile("python3", [detectorPath, message], { timeout: 5000, maxBuffer: 1024 * 64 }, (error, stdout) => {
-      const durationMs = Date.now() - startTime;
-      if (error || !stdout) {
-        resolve({
-          durationMs,
-          error: error?.message || "Local intent detector returned no output.",
-        });
-        return;
-      }
-
-      try {
-        const detected = parseProviderIntent(stdout.trim(), safeQueryHandlers);
-        resolve({ ...detected, durationMs });
-      } catch (parseError) {
-        if (deterministic) {
-          resolve({ ...deterministic, durationMs });
-          return;
-        }
-        resolve({
-          durationMs,
-          error: (parseError as Error).message,
-        });
-      }
-    });
-  });
-}
-
-async function runGeminiIntentProvider(message: string): Promise<QueryProviderResult> {
-  const startTime = Date.now();
-  console.log(`[Safe Query] Mode=gemini, using ${cloudProviderLabel} intent detector: model=${cleanedGeminiKey ? geminiModel : openRouterModel}.`);
-
-  try {
-    const allowedIntents = Object.keys(safeQueryHandlers).join(", ");
-    const detectorSystemInstruction = buildIntentDetectorSystemPrompt({
-      kind: "gemini",
-      allowedIntents,
-      staffNames: staffRoster,
-    });
-
-    let raw = "";
-    if (genAI && cleanedGeminiKey) {
-      const response = await genAI.models.generateContent({
-        model: geminiModel,
-        contents: `User question: ${message}`,
-        config: {
-          systemInstruction: detectorSystemInstruction,
-          responseMimeType: "application/json",
-        },
-      });
-      raw = response.text;
-    } else {
-      raw = await runOpenRouterChatCompletion({
-        json: true,
-        maxTokens: 500,
-        temperature: 0,
-        messages: [
-          { role: "system", content: detectorSystemInstruction },
-          { role: "user", content: `User question: ${message}` },
-        ],
-      });
-    }
-
-    const detected = parseProviderIntent(raw || "", safeQueryHandlers);
-    const deterministic = detectQueryIntent(message);
-    if (
-      deterministic &&
-      ["getTicketsByStaff", "getPendingTicketsByStaff"].includes(deterministic.intent) &&
-      ["findCustomerByName", "getCustomerHistory", "getCustomerFleetSize", "getCustomerRegion"].includes(detected.intent)
-    ) {
-      return {
-        ...deterministic,
-        confidence: Math.max(deterministic.confidence, detected.confidence),
-        durationMs: Date.now() - startTime,
-      };
-    }
-
-    if (deterministic?.intent === "getTicketsByServiceType" && detected.intent !== "getTicketsByServiceType") {
-      return {
-        ...deterministic,
-        confidence: Math.max(deterministic.confidence, 0.94),
-        durationMs: Date.now() - startTime,
-      };
-    }
-
-    if (deterministic && deterministic.confidence >= 0.9) {
-      const sameIntentDifferentParams = deterministic.intent === detected.intent && !paramsMatch(deterministic.intent, deterministic.params, detected.params);
-      const highConfidenceDisagreement = deterministic.intent !== detected.intent;
-      if (sameIntentDifferentParams || highConfidenceDisagreement) {
-        return {
-          ...deterministic,
-          confidence: Math.max(deterministic.confidence, detected.confidence),
-          durationMs: Date.now() - startTime,
-        };
-      }
-    }
-
-    return {
-      ...detected,
-      durationMs: Date.now() - startTime,
-    };
-  } catch (error) {
-    return {
-      durationMs: Date.now() - startTime,
-      error: (error as Error).message,
-    };
-  }
-}
-
-async function runOpenRouterIntentProvider(message: string): Promise<QueryProviderResult> {
-  const startTime = Date.now();
-  console.log(`[Safe Query] Mode=openrouter, using OpenRouter intent detector: model=${extraLlmModel}.`);
-
-  try {
-    const deterministic = detectQueryIntent(message);
-    if (deterministic && deterministic.confidence >= 0.9) {
-      return {
-        ...deterministic,
-        durationMs: Date.now() - startTime,
-      };
-    }
-
-    const allowedIntents = Object.keys(safeQueryHandlers).join(", ");
-    const detectorSystemInstruction = buildIntentDetectorSystemPrompt({
-      kind: "openrouter",
-      allowedIntents,
-      staffNames: staffRoster,
-    });
-    const raw = await runOpenRouterChatCompletion({
-      model: extraLlmModel,
-      reasoning: extraLlmReasoning,
-      json: true,
-      maxTokens: 500,
-      temperature: 0,
-      messages: [
-        {
-          role: "system",
-          content: detectorSystemInstruction,
-        },
-        { role: "user", content: `User question: ${message}` },
-      ],
-    });
-
-    const detected = parseProviderIntent(raw || "", safeQueryHandlers);
-    return {
-      ...detected,
-      durationMs: Date.now() - startTime,
-    };
-  } catch (error) {
-    return {
-      durationMs: Date.now() - startTime,
-      error: (error as Error).message,
-    };
-  }
-}
-
-async function runNvidiaIntentProvider(message: string): Promise<QueryProviderResult> {
-  const startTime = Date.now();
-  console.log(`[Safe Query] Mode=nvidia, using ${openRouterPrimaryLabel}/OpenRouter intent detector: model=${openRouterModel}.`);
-
-  try {
-    const deterministic = detectQueryIntent(message);
-    if (deterministic && deterministic.confidence >= 0.9) {
-      return {
-        ...deterministic,
-        durationMs: Date.now() - startTime,
-      };
-    }
-
-    const allowedIntents = Object.keys(safeQueryHandlers).join(", ");
-    const detectorSystemInstruction = buildIntentDetectorSystemPrompt({
-      kind: "nvidia",
-      allowedIntents,
-      staffNames: staffRoster,
-    });
-    const raw = await runOpenRouterChatCompletion({
-      model: openRouterModel,
-      reasoning: true,
-      json: true,
-      maxTokens: 500,
-      temperature: 0,
-      messages: [
-        {
-          role: "system",
-          content: detectorSystemInstruction,
-        },
-        { role: "user", content: `User question: ${message}` },
-      ],
-    });
-
-    const detected = parseProviderIntent(raw || "", safeQueryHandlers);
-    return {
-      ...detected,
-      durationMs: Date.now() - startTime,
-    };
-  } catch (error) {
-    return {
-      durationMs: Date.now() - startTime,
-      error: (error as Error).message,
-    };
-  }
-}
-
-function canonicalQueryParams(intent: SafeQueryIntent, params: Record<string, any> | undefined): Record<string, any> {
-  const canonical: Record<string, any> = { ...(params || {}) };
-  for (const key of Object.keys(canonical)) {
-    if (canonical[key] === undefined || canonical[key] === null || canonical[key] === false) {
-      delete canonical[key];
-    }
-  }
-  if (intent === "getCompletedTicketsThisWeek") {
-    delete canonical.dateRange;
-  }
-  return Object.keys(canonical)
-    .sort()
-    .reduce((acc: Record<string, any>, key) => {
-      acc[key] = canonical[key];
-      return acc;
-    }, {});
-}
-
-function paramsMatch(intent: SafeQueryIntent, a: Record<string, any> | undefined, b: Record<string, any> | undefined): boolean {
-  return JSON.stringify(canonicalQueryParams(intent, a)) === JSON.stringify(canonicalQueryParams(intent, b));
-}
-
 function chooseQueryProvider(
   mode: SafeQueryAiMode,
   providers: Record<QueryProviderName, QueryProviderResult>
@@ -616,58 +231,6 @@ function chooseQueryProvider(
   throw Object.assign(new Error("Both intent providers failed."), { statusCode: 400 });
 }
 
-async function runDetectedSafeQuery(
-  detected: DetectedQueryIntent,
-  authUser: AuthUser,
-  queryUser: Pick<AuthUser, "role" | "name">
-): Promise<{ params: Record<string, any>; rows: any[]; answer: string }> {
-  const validated = validateQueryIntent(detected, safeQueryHandlers);
-  const params = validateQueryParams(validated, authUser);
-  const roleScope = applyRoleScope(queryUser);
-  if (roleScope.sql === "AND 1 = 0") {
-    throw Object.assign(new Error("Access restricted. Your authenticated session is not valid for database queries."), { statusCode: 403 });
-  }
-
-  const handler = safeQueryHandlers[validated.intent];
-  const rows = await handler({
-    ...params,
-    user: queryUser,
-  });
-
-  return {
-    params,
-    rows,
-    answer: formatQueryAnswer(validated.intent, params, rows, queryUser),
-  };
-}
-
-async function attachProviderAnswer(
-  provider: QueryProviderName,
-  providers: Record<QueryProviderName, QueryProviderResult>,
-  authUser: AuthUser,
-  queryUser: Pick<AuthUser, "role" | "name">
-): Promise<any[]> {
-  const detected = providerToDetected(providers[provider]);
-  if (!detected) return [];
-
-  try {
-    const result = await runDetectedSafeQuery(detected, authUser, queryUser);
-    providers[provider] = {
-      ...providers[provider],
-      params: result.params,
-      answer: result.answer,
-      rowCount: result.rows.length,
-    };
-    return result.rows;
-  } catch (error) {
-    providers[provider] = {
-      ...providers[provider],
-      error: (error as Error).message,
-    };
-    return [];
-  }
-}
-
 function formatCompareProviderAnswer(
   providerLabel: string,
   provider: QueryProviderResult
@@ -711,649 +274,6 @@ function formatCompareWinnerReason(
     return " (intent or params mismatch)";
   }
   return "";
-}
-
-function runIntentDetectorFallback(message: string): Promise<DetectedQueryIntent | null> {
-  return runLocalIntentProvider(message).then(providerToDetected);
-}
-
-function summarizeCustomer(row: any): string {
-  const source = row.sourceType === "service_request" ? "service history" : "customer record";
-  return `#${row.id} | ${row.name || row.customerName || "Unknown customer"} | ${row.phone || "No phone"} | ${row.email || "No email"} | ${row.region || "No region"} | Fleet: ${Number(row.vehicleCount || 0)} | ${source}`;
-}
-
-function cleanDuplicateCustomerLabel(value: unknown): string {
-  return String(value || "Unknown customer")
-    .replace(/\s+#\d+\b/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function formatQueryAnswer(
-  intent: SafeQueryIntent,
-  params: Record<string, any>,
-  rows: any[],
-  queryUser?: Pick<AuthUser, "role" | "name">
-): string {
-  if (actionIntents.has(intent)) {
-    return formatActionIntentAnswer(intent, params);
-  }
-
-  if (["findCustomerByName", "findCustomerByPhone", "findCustomerByEmail"].includes(intent)) {
-    const count = rows.length;
-    const label = intent === "findCustomerByPhone" ? "phone" : intent === "findCustomerByEmail" ? "email" : "name";
-    const title = count === 0
-      ? `No customer found matching ${label} search "${params.value}".`
-      : `Yes, I found ${count} customer${count === 1 ? "" : "s"} matching ${label} search "${params.value}".`;
-    return count === 0 ? title : `${title}\n\n${rows.slice(0, 10).map(summarizeCustomer).join("\n")}`;
-  }
-
-  if (intent === "getPendingTicketsByStaff") {
-    return formatStaffWorkloadReport(params.staffName, rows, true, params);
-  }
-
-  if (intent === "getTicketsByStaff") {
-    return formatStaffWorkloadReport(params.staffName, rows, false, params);
-  }
-
-  if (intent === "getOpenTicketsByRegion") {
-    return formatRegionTicketReport(params.region, rows, { ...params, openOnly: true });
-  }
-
-  if (intent === "getTicketsByRegion") {
-    return formatRegionTicketReport(params.region, rows, params);
-  }
-
-  if (intent === "getTicketsByServiceType") {
-    return formatServiceTypeReport(params.serviceType, rows, params);
-  }
-
-  if (intent === "getTicketById") {
-    return formatTicketLookup(params.ticketId, rows);
-  }
-
-  if (intent === "getTicketsByStatusLabel") {
-    return formatStatusLabelReport(params.statusLabel, rows);
-  }
-
-  if (intent === "getCompletedTicketsThisWeek") {
-    return formatQueueReport(rows, "completed tickets", { ...params, dateRange: "this_week" });
-  }
-
-  if (intent === "getTicketsNeedingAttention") {
-    return formatTicketListReport("Tickets needing attention", rows, params);
-  }
-
-  if (intent === "getTicketsByCustomer") {
-    return formatTicketListReport(`Tickets for ${params.customerName}`, rows, params);
-  }
-
-  if (intent === "getOpenTicketsByCustomer") {
-    return formatTicketListReport(`Open tickets for ${params.customerName}`, rows, params);
-  }
-
-  if (intent === "getTicketsByIssue") {
-    return formatTicketListReport(`Tickets matching "${params.value}"`, rows, params);
-  }
-
-  if (intent === "getUnassignedTickets") {
-    return formatTicketListReport("Unassigned tickets", rows, params);
-  }
-
-  if (intent === "getMostCommonIssues") {
-    return formatIssueSummary(rows, params.dateRange);
-  }
-
-  if (intent === "getCustomerWithMostRequests") {
-    return formatTopCustomers(rows, params.dateRange);
-  }
-
-  if (intent === "getCustomerHistory") {
-    const count = rows.length;
-    return formatOperationalAnswer({
-      title: `Customer history for ${params.customerName}`,
-      direct: `Found ${count} visible record${count === 1 ? "" : "s"} for ${params.customerName}.`,
-      details: rows.slice(0, 10).map(summarizeRow),
-      suggestedActions: count > 0 ? [
-        "- Review the latest IDs before creating a duplicate ticket.",
-        "- Check open jobs for this customer if follow-up is needed.",
-      ] : [
-        "- Try a shorter customer name or alternate spelling.",
-        "- Create a new lead if this is a brand-new customer.",
-      ],
-    });
-  }
-
-  if (intent === "getCustomerFleetSize") {
-    const count = rows.length;
-    const lines = rows.slice(0, 10).map(row => `${row.customerName}: ${Number(row.vehicleCount || 0)} vehicles${row.region ? ` | ${row.region}` : ""}`);
-    return formatOperationalAnswer({
-      title: `Fleet size for ${params.customerName}`,
-      direct: `Found ${count} fleet-size result${count === 1 ? "" : "s"} for ${params.customerName}.`,
-      details: lines,
-    });
-  }
-
-  if (intent === "getCustomerRegion") {
-    const count = rows.length;
-    const lines = rows.slice(0, 10).map(row => `${row.customerName}: ${row.region || "No region"}${row.phone ? ` | ${row.phone}` : ""}`);
-    return formatOperationalAnswer({
-      title: `Customer region for ${params.customerName}`,
-      direct: `Found ${count} region result${count === 1 ? "" : "s"} for ${params.customerName}.`,
-      details: lines,
-    });
-  }
-
-  if (["getPendingTickets", "getOpenTickets"].includes(intent)) {
-    return formatQueueReport(rows, intent === "getPendingTickets" ? "pending service queue" : "open service queue", params);
-  }
-
-  if (["getCompletedTickets", "getLatestRequests"].includes(intent)) {
-    const count = rows.length;
-    const label = intent === "getCompletedTickets" ? "completed" : "latest";
-    const totalMatches = Number(rows[0]?.totalMatches || rows.length);
-    const guestScopeNote = queryUser?.role === "guest"
-      ? "\nGuest access: only records created by this guest account are shown."
-      : "";
-    const title = intent === "getLatestRequests"
-      ? `Showing latest ${count} visible ticket${count === 1 ? "" : "s"} out of ${totalMatches}${humanDateRangeLabel(params.dateRange)}.`
-      : `Found ${totalMatches} ${label} ticket${totalMatches === 1 ? "" : "s"}${humanDateRangeLabel(params.dateRange)}.`;
-    if (params.countOnly) return title;
-    return count === 0
-      ? `${title}${guestScopeNote}`
-      : `${title}${guestScopeNote}\n\n${rows.slice(0, 10).map(summarizeRow).join("\n")}`;
-  }
-
-  if (intent === "getTechnicianWorkload") {
-    if (rows.length === 0) return "No technician workload records found for your access level.";
-    const lines = rows.slice(0, 10).map(row => `${row.staffName}: ${Number(row.openTickets || 0)} open / ${Number(row.totalTickets || 0)} total`);
-    return formatOperationalAnswer({
-      title: "Technician workload summary",
-      direct: `Found workload data for ${rows.length} technician${rows.length === 1 ? "" : "s"}.`,
-      details: lines,
-      suggestedActions: [
-        "- Assign new tickets to lower-load technicians where possible.",
-        "- Review highest workload before adding urgent jobs.",
-      ],
-    });
-  }
-
-  if (intent === "getHighestWorkload") {
-    if (rows.length === 0) return "No workload records found for your access level.";
-    const row = rows[0];
-    return formatOperationalAnswer({
-      title: "Technician overload check",
-      direct: `${row.staffName} has the highest visible workload with ${Number(row.openTickets || 0)} open tickets and ${Number(row.totalTickets || 0)} total records.`,
-      suggestedActions: [
-        "- Avoid assigning extra non-urgent jobs to this technician.",
-        "- Check lowest workload for a possible reassignment option.",
-      ],
-    });
-  }
-
-  if (intent === "getLowestWorkload") {
-    if (rows.length === 0) return "No workload records found for your access level.";
-    const row = rows[0];
-    const lines = rows.slice(0, 3).map(item => `${item.staffName}: ${Number(item.openTickets || 0)} open / ${Number(item.totalTickets || 0)} total`);
-    return formatOperationalAnswer({
-      title: "Available technician check",
-      direct: `${row.staffName} currently has the lowest visible workload with ${Number(row.openTickets || 0)} open tickets.`,
-      details: lines,
-      suggestedActions: [
-        "- Consider these technicians first for new low-priority assignments.",
-        "- Confirm location before final dispatch.",
-      ],
-    });
-  }
-
-  if (intent === "getStaffPerformance") {
-    if (rows.length === 0) return "No staff performance records found for your access level.";
-    const lines = rows.slice(0, 10).map(row => `${row.staffName}: ${Number(row.completedRecords || 0)} completed / ${Number(row.totalRecords || 0)} total`);
-    return formatOperationalAnswer({
-      title: "Staff performance summary",
-      direct: `Found performance data for ${rows.length} staff member${rows.length === 1 ? "" : "s"}.`,
-      details: lines,
-      suggestedActions: [
-        "- Compare completion count with current workload before reassigning tickets.",
-        "- Review pending jobs for high-volume staff.",
-      ],
-    });
-  }
-
-  if (intent === "getDuplicateRequests") {
-    if (rows.length === 0) return "No duplicate requests found for your access level.";
-    const lines = rows.slice(0, 10).map(row => `${cleanDuplicateCustomerLabel(row.customerName || row.customerKey)}: ${row.duplicateCount} duplicates, latest ID ${row.latestId}`);
-    return formatOperationalAnswer({
-      title: "Duplicate request detection",
-      direct: `Found ${rows.length} possible duplicate customer/request group${rows.length === 1 ? "" : "s"}.`,
-      details: lines,
-      suggestedActions: [
-        "- Check the latest ID before creating or assigning another ticket.",
-        "- Merge or close accidental duplicates where policy allows.",
-      ],
-    });
-  }
-
-  if (intent === "getDashboardSummary") {
-    const row = rows[0] || {};
-    const totalRecords = Number(row.totalRecords || 0);
-    const registeredCustomers = Number(row.registeredCustomers || row.uniqueCustomers || 0);
-    const openRecords = Number(row.openRecords || 0);
-    const newRecords = Number(row.newRecords || 0);
-    const completedRecords = Number(row.completedRecords || 0);
-    const totalUnits = Number(row.totalUnits || 0);
-    const totalOperationalRecords = totalRecords + registeredCustomers;
-    return formatOperationalAnswer({
-      title: "SynoHub operational dashboard",
-      direct: `The SynoHub CRM currently has ${totalOperationalRecords} visible operational records across registered customers and service/lead records.`,
-      breakdown: [
-        `- Registered Customers: ${registeredCustomers}`,
-        `- Lead / Service Records: ${totalRecords}`,
-        `- Open Records: ${openRecords}`,
-        `- New Records: ${newRecords}`,
-        `- Completed Records: ${completedRecords}`,
-        `- Total Units: ${totalUnits}`,
-      ],
-      suggestedActions: [
-        "- View pending service queue for dispatch priorities.",
-        "- Check technician workload before assigning new tickets.",
-        "- Review status summary for completed, open, and new records.",
-      ],
-    });
-  }
-
-  if (intent === "getRegionSummary") {
-    if (rows.length === 0) return "No region summary records found for your access level.";
-    const lines = rows.slice(0, 10).map(row => `${row.region}: ${Number(row.totalRecords || 0)} records, ${Number(row.openRecords || 0)} open, ${Number(row.totalUnits || 0)} units`);
-    return formatOperationalAnswer({
-      title: params.region ? `${params.region} region summary` : "Region summary",
-      direct: `Found ${rows.length} region summar${rows.length === 1 ? "y" : "ies"} visible to you.`,
-      details: lines,
-      suggestedActions: [
-        "- Review open counts before planning route-wise dispatch.",
-        "- Use technician workload to balance region assignments.",
-      ],
-    });
-  }
-
-  if (intent === "getStatusSummary") {
-    if (rows.length === 0) return "No status summary records found for your access level.";
-    const lines = rows.slice(0, 10).map(row => `${row.status}: ${Number(row.totalRecords || 0)} records`);
-    return formatOperationalAnswer({
-      title: "Status summary",
-      direct: `Found ${rows.length} status bucket${rows.length === 1 ? "" : "s"} visible to you.`,
-      details: lines,
-    });
-  }
-
-  if (intent === "getDailySummary") {
-    if (rows.length === 0) return "No daily summary records found for your access level.";
-    const lines = rows.slice(0, 10).map(row => `${row.day}: ${Number(row.totalRecords || 0)} total, ${Number(row.openRecords || 0)} open, ${Number(row.completedRecords || 0)} completed`);
-    return formatOperationalAnswer({
-      title: "Daily summary",
-      direct: `Found ${rows.length} day${rows.length === 1 ? "" : "s"} of visible service activity.`,
-      details: lines,
-      suggestedActions: [
-        "- Review days with high open counts first.",
-        "- Use the pending queue for current dispatch planning.",
-      ],
-    });
-  }
-
-  if (intent === "getMonthlySummary") {
-    if (rows.length === 0) return "No monthly summary records found for your access level.";
-    const lines = rows.slice(0, 12).map(row => `${row.month}: ${Number(row.totalRecords || 0)} total, ${Number(row.openRecords || 0)} open, ${Number(row.completedRecords || 0)} completed`);
-    return formatOperationalAnswer({
-      title: "Monthly summary",
-      direct: `Found ${rows.length} month${rows.length === 1 ? "" : "s"} of visible service activity.`,
-      details: lines,
-      suggestedActions: [
-        "- Compare open counts month to month for queue pressure.",
-        "- Review technician performance for completion trends.",
-      ],
-    });
-  }
-
-  if (["getStaffChatHistory", "getGuestChatHistory"].includes(intent)) {
-    const count = rows.length;
-    const title = `Found ${count} chat message${count === 1 ? "" : "s"}.`;
-    const lines = rows.slice(0, 10).map(row => `${row.username} | ${row.role}: ${cleanRecordDescription(row.content).slice(0, 140)}`);
-    return count === 0 ? title : `${title}\n\n${lines.join("\n")}`;
-  }
-
-  const count = rows.length;
-  const title = `Found ${count} latest record${count === 1 ? "" : "s"}.`;
-  return count === 0 ? title : `${title}\n\n${rows.slice(0, 10).map(summarizeRow).join("\n")}`;
-}
-
-// Helper to handle AI record saving/updating/deletion via trigger tags
-function mapInputToSchema(input: any): any {
-  if (!input || typeof input !== "object") return {};
-  const schema: any = {};
-  
-  const getVal = (camel: string, snake: string, ...alts: string[]) => {
-    if (input[camel] !== undefined) return input[camel];
-    if (input[snake] !== undefined) return input[snake];
-    for (const alt of alts) {
-      if (input[alt] !== undefined) return input[alt];
-    }
-    return undefined;
-  };
-
-  const assignIfDefined = (targetKey: string, camel: string, snake: string, ...alts: string[]) => {
-    const val = getVal(camel, snake, ...alts);
-    if (val !== undefined) {
-      schema[targetKey] = val;
-    }
-  };
-
-  assignIfDefined("source", "source", "source");
-  assignIfDefined("region", "region", "region");
-  assignIfDefined("status", "status", "status");
-  assignIfDefined("implementationType", "implementationType", "implementation_type");
-  assignIfDefined("customerName", "customerName", "customer_name");
-  assignIfDefined("contactName", "contactName", "contact_name");
-  assignIfDefined("phone", "phone", "phone");
-  assignIfDefined("email", "email", "email");
-  assignIfDefined("address", "address", "address");
-  assignIfDefined("mapLink", "mapLink", "map_link");
-  assignIfDefined("coordinates", "coordinates", "coordinates");
-  
-  assignIfDefined("newQty", "newQty", "new_qty", "qty", "quantity");
-  assignIfDefined("migrateQty", "migrateQty", "migrate_qty");
-  assignIfDefined("tradingQty", "tradingQty", "trading_qty");
-  assignIfDefined("serviceQty", "serviceQty", "service_qty");
-  assignIfDefined("otherQty", "otherQty", "other_qty");
-  assignIfDefined("accessories", "accessories", "accessories");
-  
-  assignIfDefined("requestedPerson", "requestedPerson", "requested_person");
-  assignIfDefined("salesPerson", "salesPerson", "sales_person");
-  assignIfDefined("salesType", "salesType", "sales_type");
-  
-  assignIfDefined("projectValue", "projectValue", "project_value");
-  assignIfDefined("priceDetails", "priceDetails", "price_details");
-  assignIfDefined("comment", "comment", "comment");
-  
-  assignIfDefined("issueDescription", "issueDescription", "issue_description", "description");
-  assignIfDefined("location", "location", "location");
-  assignIfDefined("paymentStatus", "paymentStatus", "payment_status", "payment");
-  assignIfDefined("amount", "amount", "amount");
-  assignIfDefined("vehicleDetails", "vehicleDetails", "vehicle_details");
-  assignIfDefined("notes", "notes", "notes");
-  assignIfDefined("jobStatus", "jobStatus", "job_status", "status");
-  assignIfDefined("createdAt", "createdAt", "created_at");
-
-  return schema;
-}
-
-const pendingForcedServiceConfirmations = new Map<string, {
-  fields: ForcedServiceRequestFields;
-  possibleCustomerIds: number[];
-  createdAt: number;
-}>();
-
-function parseCustomerConfirmationReply(input: string, possibleCustomerIds: number[]): { confirmedCustomerId?: number; forceNewCustomer?: boolean } | null {
-  const normalized = normalizeQueryText(input);
-  const trimmed = normalized.trim();
-  if (
-    /^(no|nope)$/i.test(trimmed) ||
-    /\b(new customer|create new|new one|different customer|not same|not the same)\b/.test(trimmed)
-  ) {
-    return { forceNewCustomer: true };
-  }
-
-  if (/\b(yes|same|existing|link|use|correct)\b/.test(normalized)) {
-    const idMatch = normalized.match(/\b(\d{1,10})\b/);
-    const confirmedCustomerId = idMatch ? Number(idMatch[1]) : possibleCustomerIds[0];
-    if (confirmedCustomerId && possibleCustomerIds.includes(confirmedCustomerId)) {
-      return { confirmedCustomerId };
-    }
-  }
-
-  return null;
-}
-
-function isExpiredPendingConfirmation(createdAt: number): boolean {
-  return Date.now() - createdAt > 30 * 60 * 1000;
-}
-
-function isAcknowledgementOnlyMessage(input: string): boolean {
-  return /^(ok|okay|k|kk|yes okay|alright|all right|noted|got it|thanks|thank you|fine)$/i.test(String(input || "").trim());
-}
-
-async function saveForcedServiceRequestFromMessage(
-  input: string,
-  authUser: AuthUser,
-  chatChannel: string,
-): Promise<ForcedServiceRequestResult | null> {
-  const pending = pendingForcedServiceConfirmations.get(chatChannel);
-  if (pending) {
-    if (isExpiredPendingConfirmation(pending.createdAt)) {
-      pendingForcedServiceConfirmations.delete(chatChannel);
-    } else {
-      const decision = parseCustomerConfirmationReply(input, pending.possibleCustomerIds);
-      if (decision) {
-        pendingForcedServiceConfirmations.delete(chatChannel);
-        return saveForcedServiceRequestFields(pending.fields, authUser, extractRegionName, decision);
-      }
-    }
-  }
-
-  const parsed = parseForcedServiceRequest(input);
-  if (!parsed) return null;
-  const result = await saveForcedServiceRequestFields(parsed, authUser, extractRegionName);
-  if (result.requiresCustomerConfirmation) {
-    pendingForcedServiceConfirmations.set(chatChannel, {
-      fields: result.fields,
-      possibleCustomerIds: (result.possibleCustomers || []).map(customer => customer.id),
-      createdAt: Date.now(),
-    });
-  }
-  return result;
-}
-
-async function handleAIRecordSave(reply: string, userRole: string = "guest", userName: string = ""): Promise<{ reply: string; savedRecord?: any }> {
-  // 1. Process [[DELETE_RECORD:...]]
-  const deleteMatch = findRecordTrigger(reply, "DELETE_RECORD");
-  if (deleteMatch) {
-    try {
-      if (userRole !== "admin") {
-        console.warn(`[Security Alert] Non-admin user "${userName}" tried to delete a record via AI.`);
-        if (userRole === "staff") {
-          return {
-            reply: `Access Denied: Staff users can create and view records but cannot modify or delete existing records. Please contact a Manager or Administrator.`
-          };
-        }
-        return {
-          reply: removeRecordTrigger(reply, deleteMatch) + `\n\n(Authorization Warning: Access Denied. Only system administrators can delete records.)`
-        };
-      }
-
-      const rawJson = extractRecordTriggerJson(deleteMatch.body);
-      const record = JSON.parse(rawJson);
-      const id = parseInt(record.id);
-      console.log(`[AI Auto-Delete] Detected record: ${record.type}, ID: ${id}`);
-      if (record.type === "registration") {
-        await db.delete(serviceRequests).where(eq(serviceRequests.id, id));
-        return {
-          reply: removeRecordTrigger(reply, deleteMatch) + `\n\n(CRM: Registration record #${id} deleted successfully by Admin.)`
-        };
-      } else if (record.type === "service") {
-        await db.delete(serviceRequests).where(eq(serviceRequests.id, id));
-        return {
-          reply: removeRecordTrigger(reply, deleteMatch) + `\n\n(CRM: Service ticket record #${id} deleted successfully by Admin.)`
-        };
-      } else if (record.type === "customer") {
-        await db.delete(customers).where(eq(customers.id, id));
-        return {
-          reply: removeRecordTrigger(reply, deleteMatch) + `\n\n(CRM: Customer account record #${id} deleted successfully by Admin.)`
-        };
-      }
-    } catch (e) {
-      console.error("AI Auto-Delete failed:", e);
-    }
-  }
-
-  // 2. Process [[UPDATE_RECORD:...]]
-  const updateMatch = findRecordTrigger(reply, "UPDATE_RECORD");
-  if (updateMatch) {
-    try {
-      if (userRole === "guest") {
-        return {
-          reply: removeRecordTrigger(reply, updateMatch) + `\n\n(Authorization Warning: Access Denied. Public guest users cannot update records.)`
-        };
-      }
-
-      const rawJson = extractRecordTriggerJson(updateMatch.body);
-      const record = JSON.parse(rawJson);
-      const id = parseInt(record.id);
-      console.log(`[AI Auto-Update] Detected record update: ${record.type}, ID: ${id}`);
-      
-      // Staff authorization validation: Staff coordinators cannot edit previous/existing records
-      if (userRole === "staff") {
-        console.warn(`[Security Guard] Staff member "${userName}" attempted to edit record #${id} via SynoAI.`);
-        return {
-          reply: `Access Denied: Staff users can create and view records but cannot modify or delete existing records. Please contact a Manager or Administrator.`
-        };
-      }
-
-      if (record.type === "registration") {
-        const mappedData = mapInputToSchema(record.data);
-        await db.update(serviceRequests).set(mappedData).where(eq(serviceRequests.id, id));
-        return {
-          reply: removeRecordTrigger(reply, updateMatch) + `\n\n(CRM: Registration #${id} updated successfully.)`
-        };
-      } else if (record.type === "service") {
-        const mappedData = mapInputToSchema(record.data);
-        await db.update(serviceRequests).set(mappedData).where(eq(serviceRequests.id, id));
-        return {
-          reply: removeRecordTrigger(reply, updateMatch) + `\n\n(CRM: Service ticket #${id} updated successfully.)`
-        };
-      } else if (record.type === "customer") {
-        if (userRole !== "admin") {
-          return {
-            reply: removeRecordTrigger(reply, updateMatch) + `\n\n(Authorization Warning: Access Denied. Only system administrators can edit customer accounts.)`
-          };
-        }
-        const mappedCustomer: any = {};
-        if (record.data.name || record.data.customer_name) mappedCustomer.name = record.data.name || record.data.customer_name;
-        if (record.data.contactName || record.data.contact_name) mappedCustomer.contactName = record.data.contactName || record.data.contact_name;
-        if (record.data.phone) mappedCustomer.phone = record.data.phone;
-        if (record.data.email) mappedCustomer.email = record.data.email;
-        if (record.data.region) mappedCustomer.region = record.data.region;
-        if (record.data.implementationType || record.data.implementation_type) mappedCustomer.implementationType = record.data.implementationType || record.data.implementation_type;
-        if (record.data.vehicleCount !== undefined || record.data.vehicle_count !== undefined) mappedCustomer.vehicleCount = record.data.vehicleCount !== undefined ? record.data.vehicleCount : record.data.vehicle_count;
-        
-        await db.update(customers).set(mappedCustomer).where(eq(customers.id, id));
-        return {
-          reply: removeRecordTrigger(reply, updateMatch) + `\n\n(CRM: Customer account #${id} updated successfully.)`
-        };
-      }
-    } catch (e) {
-      console.error("AI Auto-Update failed:", e);
-    }
-  }
-
-  // 3. Process [[SAVE_RECORD:...]]
-  const saveMatch = findRecordTrigger(reply, "SAVE_RECORD");
-  if (!saveMatch) return { reply };
-
-  try {
-    const rawJson = extractRecordTriggerJson(saveMatch.body);
-    const rawRecord = JSON.parse(rawJson);
-    const parsedRecord = SaveRecordSchema.safeParse(rawRecord);
-    if (!parsedRecord.success) {
-      throw new Error("Invalid SAVE_RECORD payload.");
-    }
-    const record: any = parsedRecord.data;
-    console.log(`[AI Auto-Save] Detected record save: ${record.type} by role=${userRole}`);
-    
-    if (record.type === "registration") {
-      const mapped = mapInputToSchema(record);
-      // Ensure the staff member's ticket is assigned to them automatically
-      if (userRole === "staff" && userName) {
-        mapped.requestedPerson = userName;
-      }
-      
-      const [res]: any = await db.insert(serviceRequests).values({
-        customerName: mapped.customerName || "Unknown",
-        contactName: mapped.contactName || "",
-        phone: mapped.phone || "",
-        email: mapped.email || "",
-        region: mapped.region || "",
-        address: mapped.address || "",
-        mapLink: mapped.mapLink || "",
-        coordinates: mapped.coordinates || "",
-        source: mapped.source || "",
-        status: mapped.status || "New Lead",
-        implementationType: mapped.implementationType || "",
-        salesPerson: mapped.salesPerson || "",
-        salesType: mapped.salesType || "",
-        requestedPerson: mapped.requestedPerson || "",
-        comment: mapped.comment || "",
-        projectValue: mapped.projectValue || "",
-        priceDetails: mapped.priceDetails || "",
-        accessories: mapped.accessories || "",
-        newQty: mapped.newQty || 0,
-        migrateQty: mapped.migrateQty || 0,
-        tradingQty: mapped.tradingQty || 0,
-        serviceQty: mapped.serviceQty || 0,
-        otherQty: mapped.otherQty || 0,
-        createdBy: userName || 'guest'
-      });
-
-      try {
-        await saveLocalSalesplusEntry(mapped, res.insertId, mapped.requestedPerson || "");
-      } catch (salesplusErr) {
-        console.error("Failed to save local Salesplus entry:", salesplusErr);
-      }
-
-      // Synchronize registration customer to customers table
-      try {
-        const syncResult = await syncRegistrationCustomer(mapped, userName || "guest", 1);
-        if (syncResult.action === "created") {
-          console.log(`[AI Auto-Save] Synchronized customer ${syncResult.customerName} into customers table.`);
-        } else if (syncResult.action === "updated") {
-          console.log(`[AI Auto-Save] Updated existing customer ${syncResult.customerName} vehicleCount to ${syncResult.vehicleCount}`);
-        }
-      } catch (custErr) {
-        console.error("Failed to auto-sync customer:", custErr);
-      }
-
-      return {
-        reply: removeRecordTrigger(reply, saveMatch) + `\n\n(CRM: Registration saved successfully. ID: ${res.insertId})`,
-        savedRecord: { ...record, id: res.insertId }
-      };
-    } else if (record.type === "service") {
-      const ticketId = record.ticketId || ('TKT-' + crypto.randomBytes(4).toString('hex').toUpperCase());
-      const mapped = mapInputToSchema(record);
-      if (userRole === "staff" && userName) {
-        mapped.requestedPerson = userName;
-      }
-      
-      const [res]: any = await db.insert(serviceRequests).values({
-        customerName: mapped.customerName || "Unknown",
-        issueDescription: mapped.issueDescription || "",
-        jobStatus: mapped.jobStatus || "New",
-        newQty: mapped.newQty || 1,
-        requestedPerson: mapped.requestedPerson || "",
-        paymentStatus: mapped.paymentStatus || "",
-        amount: mapped.amount || "",
-        salesPerson: mapped.salesPerson || "",
-        createdBy: userName || 'guest'
-      });
-      return {
-        reply: removeRecordTrigger(reply, saveMatch) + `\n\n(CRM: Service ticket ${ticketId} created successfully.)`,
-        savedRecord: { ...record, id: res.insertId, ticketId }
-      };
-    }
-    return { reply: removeRecordTrigger(reply, saveMatch) };
-  } catch (pErr) {
-    console.error("Failed to parse or save AI record:", pErr);
-    return {
-      reply: removeRecordTrigger(reply, saveMatch) + "\n\n(System: Failed to auto-save record. Please try manual entry.)"
-    };
-  }
 }
 
 export async function startServer() {
@@ -1663,6 +583,22 @@ export async function startServer() {
         });
       }
 
+      const recentMessages = await getRecentChatMessages(chatChannel, 8);
+      const requestedPersonAnswer = await answerRequestedPersonLookup(message, authUser, recentMessages);
+      if (requestedPersonAnswer) {
+        const answer = cleanVisibleAssistantText(requestedPersonAnswer);
+        await saveChatMessage("assistant", answer, chatChannel);
+
+        return res.json({
+          answer,
+          reply: answer,
+          mode: aiMode,
+          winner: "backend",
+          intent: "getTicketsByCustomer",
+          rows: [],
+        });
+      }
+
       const providers: Record<QueryProviderName, QueryProviderResult> = {
         gemini: { durationMs: 0, error: "Not run for this mode." },
         local: { durationMs: 0, error: "Not run for this mode." },
@@ -1830,6 +766,17 @@ export async function startServer() {
           serviceRequestId: forcedServiceRequest.serviceRequestId,
           salesplusSaved: forcedServiceRequest.salesplusSaved,
           extracted: forcedServiceRequest.fields,
+        });
+      }
+
+      const requestedPersonAnswer = await answerRequestedPersonLookup(message, authUser, persistedHistory);
+      if (requestedPersonAnswer) {
+        const reply = cleanVisibleAssistantText(requestedPersonAnswer);
+        await saveChatMessage("assistant", reply, chatChannel);
+        return res.json({
+          reply,
+          selectedProvider: "backend",
+          intent: "requestedPersonLookup",
         });
       }
 

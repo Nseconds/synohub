@@ -68,7 +68,8 @@ CRITICAL FLUID CONVERSATION & INTELLIGENT MATCHING RULES:
 3. MANDATORY ALIGNED KEY-VALUE DISPLAY FORMAT:
    - When representing, summarizing, displaying, or confirming any Lead Registration or Service Ticket record (whether creating or updating), you MUST output exactly this aligned block format:
      Service Type       : [Service / Implementation Type here, e.g. LOCATOR]
-     Customer Name      : [Contact Name here] | [Customer Name here]
+     Customer Name      : [Customer/company name here only]
+     Contact Name       : [Human contact person name here only]
      Contact Number     : [Phone number here]
      Quantity           : [Quantity of devices here, e.g. 1]
      Payment            : [PAID/Pending/Not Applicable here]

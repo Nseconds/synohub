@@ -182,12 +182,12 @@ export const ChatPage = ({
             animate={{ opacity: 1, y: 0 }}
             key={`msg-${idx}`}
             className={cn(
-              "flex flex-col max-w-[85%] gap-1.5",
+              "flex flex-col min-w-0 max-w-[85%] gap-1.5",
               m.role === "user" ? "ml-auto items-end" : "mr-auto items-start"
             )}
           >
             <div className={cn(
-              "p-4 rounded-2xl text-xs leading-relaxed shadow-sm whitespace-pre-line",
+              "max-w-full p-4 rounded-2xl text-xs leading-relaxed shadow-sm whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
               m.role === "user" 
                 ? "bg-zinc-800 text-white rounded-br-none" 
                 : "bg-white text-zinc-700 rounded-bl-none border border-zinc-100"

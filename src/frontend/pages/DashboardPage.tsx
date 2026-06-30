@@ -378,20 +378,20 @@ export function DashboardPage({
               <div>
                 <h3 className="font-bold text-zinc-950 text-sm tracking-tight flex items-center gap-2">
                   <Clock size={16} className="text-teal-accent" />
-                  Real-Time Activity Feed {searchTerm && <span className="text-xs font-normal text-zinc-400 font-sans">(Filtered)</span>}
+                  Real-Time Activity Feed
                 </h3>
                 <p className="text-zinc-500 text-[11px] mt-0.5">Showing recent registrations and updates. Click to view or edit form.</p>
               </div>
             </div>
 
             <div className="grid gap-3">
-              {filteredRegistrations.length === 0 ? (
+              {registrations.length === 0 ? (
                 <div className="border border-dashed border-zinc-200 rounded-xl p-16 text-center text-zinc-400 text-xs">
-                  {searchTerm ? "No matching saved leads found." : "No recent activity logs found."}
+                  No recent activity logs found.
                 </div>
               ) : (
                 (() => {
-                  const sorted = [...filteredRegistrations].reverse();
+                  const sorted = [...registrations].reverse();
                   const visible = showAllFeed ? sorted : sorted.slice(0, 5);
                   return (
                     <>
@@ -432,7 +432,7 @@ export function DashboardPage({
                           </div>
                         </div>
                       ))}
-                      {filteredRegistrations.length > 5 && (
+                      {registrations.length > 5 && (
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -440,7 +440,7 @@ export function DashboardPage({
                           }}
                           className="w-full py-2.5 border border-dashed border-zinc-200 hover:border-teal-accent/40 rounded-xl text-[10px] font-extrabold uppercase tracking-wider text-zinc-500 hover:text-teal-accent transition-all text-center mt-2"
                         >
-                          {showAllFeed ? "Collapse Activity Feed" : `View All Saved Logs (${filteredRegistrations.length})`}
+                          {showAllFeed ? "Collapse Activity Feed" : `View All Saved Logs (${registrations.length})`}
                         </button>
                       )}
                     </>

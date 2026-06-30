@@ -128,10 +128,12 @@ async function findExistingCustomerForServiceRequest(
 function validateForcedServiceRequestFields(fields: ForcedServiceRequestFields) {
   const missing: string[] = [];
   if (isMissingTemplateValue(fields.customerName) || fields.customerName === "Unknown") missing.push("Customer Name");
+  if (isMissingTemplateValue(fields.contactName)) missing.push("Contact Person");
   if (isMissingTemplateValue(fields.phone)) missing.push("Contact Number");
   if (isMissingTemplateValue(fields.implementationType)) missing.push("Implementation Type");
   if (isMissingTemplateValue(fields.issueDescription)) missing.push("Description");
   if (isMissingTemplateValue(fields.location)) missing.push("Service Location");
+  if (isMissingTemplateValue(fields.requestedPerson)) missing.push("Requested Person");
   if (missing.length > 0) {
     throw Object.assign(new Error(`Missing required service request fields: ${missing.join(", ")}.`), { statusCode: 400 });
   }
@@ -290,6 +292,7 @@ export async function saveForcedServiceRequestFields(
     `Customer: ${customerName}`,
     fields.contactName ? `Contact Person: ${fields.contactName}${incompleteContactName ? " (incomplete in request)" : ""}` : "",
     `Phone: ${fields.phone}`,
+    fields.requestedPerson ? `Requested Person: ${fields.requestedPerson}` : "",
     fields.driverNumber ? `Driver Phone: ${fields.driverNumber}` : "",
     `Type: ${fields.implementationType}`,
     `Issue: ${fields.issueDescription}`,
@@ -322,6 +325,11 @@ export async function createLeadRegistration(body: any, authUser: AuthUser) {
   if (userRole === "staff" && userName) {
     reqPerson = userName;
   }
+  const resolvedPerson = reqPerson || payload.salesPerson || "";
+  if (isMissingTemplateValue(resolvedPerson)) {
+    throw Object.assign(new Error("Missing required lead fields: Requested Person."), { statusCode: 400 });
+  }
+  const leadSalesPerson = payload.salesPerson || resolvedPerson;
 
   const [result]: any = await db.insert(serviceRequests).values({
     customerName: payload.customerName || "",
@@ -335,9 +343,9 @@ export async function createLeadRegistration(body: any, authUser: AuthUser) {
     source: payload.source || "",
     status: payload.status || "New Lead",
     implementationType: payload.implementationType || "",
-    salesPerson: payload.salesPerson || "",
+    salesPerson: leadSalesPerson,
     salesType: payload.salesType || "",
-    requestedPerson: reqPerson,
+    requestedPerson: resolvedPerson,
     comment: payload.comment || "",
     projectValue: payload.projectValue || "",
     priceDetails: payload.priceDetails || "",
@@ -353,7 +361,7 @@ export async function createLeadRegistration(body: any, authUser: AuthUser) {
   });
 
   try {
-    await saveLocalSalesplusEntry({ ...body, ...payload, requestedPerson: reqPerson }, result.insertId, reqPerson);
+    await saveLocalSalesplusEntry({ ...body, ...payload, requestedPerson: resolvedPerson }, result.insertId, resolvedPerson);
   } catch (salesplusErr) {
     console.error("Failed to save local Salesplus entry:", salesplusErr);
   }
@@ -381,16 +389,20 @@ export async function createServiceTicket(body: any, authUser: AuthUser) {
   if (userRole === "staff" && userName) {
     reqPerson = userName;
   }
+  const salesPerson = payload.assignee || (payload as any).salesPerson || reqPerson;
+  if (isMissingTemplateValue(reqPerson) && isMissingTemplateValue(salesPerson)) {
+    throw Object.assign(new Error("Missing required service request fields: Requested Person."), { statusCode: 400 });
+  }
 
   const [result]: any = await db.insert(serviceRequests).values({
     customerName: payload.customerName || "",
     issueDescription: payload.description || "",
     jobStatus: payload.status || "Pending",
     newQty: payload.quantity,
-    requestedPerson: reqPerson,
+    requestedPerson: reqPerson || salesPerson,
     paymentStatus: payload.payment || "",
     amount: payload.amount || "",
-    salesPerson: payload.assignee || "",
+    salesPerson,
     location: payload.location || "",
     region: payload.location || payload.region || "",
     status: "New Lead",

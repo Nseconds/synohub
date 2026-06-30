@@ -21,6 +21,19 @@ import { LoginPage } from "./frontend/pages/LoginPage";
 import type { Customer, Registration, ServiceTicket } from "./frontend/types";
 import { isValidStoredUser } from "./frontend/utils/auth";
 
+function findOptionMatch(value: string | undefined, list: string[], defaultValue?: string): string {
+  if (!value) return defaultValue !== undefined ? defaultValue : list[0];
+  const cleanedVal = value.trim().toUpperCase().replace(/\s*\+\s*/g, "+").replace(/\s+/g, "");
+  const normalize = (option: string) => option.trim().toUpperCase().replace(/\s*\+\s*/g, "+").replace(/\s+/g, "");
+  const exact = list.find(opt => normalize(opt) === cleanedVal);
+  if (exact) return exact;
+
+  const found = list.find(opt => {
+    const cleanedOpt = normalize(opt);
+    return cleanedOpt.startsWith(cleanedVal) || cleanedOpt.includes(cleanedVal);
+  });
+  return found || defaultValue || list[0];
+}
 export default function App() {
   const [user, setUser] = useState<{ name: string; role: string; token: string } | null>(() => {
     try {
@@ -189,12 +202,12 @@ export default function App() {
       const selectedReg = data.registrations.find(r => r.id === selectedLeadId);
       if (selectedReg) {
         setLeadForm({
-          status: selectedReg.status || 'New Lead',
-          region: selectedReg.region || REGIONS[0],
-          implementationType: selectedReg.implementationType || IMPLEMENTATION_TYPES[0],
-          salesPerson: selectedReg.salesPerson || SALES_PEOPLE[0],
-          salesType: selectedReg.salesType || SALES_TYPES[0],
-          source: selectedReg.source || SOURCES[0],
+          status: findOptionMatch(selectedReg.status, LEAD_STATUSES, "New Lead"),
+          region: findOptionMatch(selectedReg.region, REGIONS, REGIONS[0]),
+          implementationType: findOptionMatch(selectedReg.implementationType, IMPLEMENTATION_TYPES, IMPLEMENTATION_TYPES[0]),
+          salesPerson: findOptionMatch(selectedReg.salesPerson, SALES_PEOPLE, SALES_PEOPLE[0]),
+          salesType: findOptionMatch(selectedReg.salesType, SALES_TYPES, SALES_TYPES[0]),
+          source: findOptionMatch(selectedReg.source, SOURCES, SOURCES[0]),
           newQty: selectedReg.newQty || 0,
           migrateQty: selectedReg.migrateQty || 0,
           tradingQty: selectedReg.tradingQty || 0,
@@ -212,11 +225,11 @@ export default function App() {
           projectValue: selectedReg.projectValue || "",
           priceDetails: selectedReg.priceDetails || "",
           accessories: selectedReg.accessories || "",
-          requestedPerson: selectedReg.requestedPerson || ""
+          requestedPerson: findOptionMatch(selectedReg.requestedPerson, requestedPeopleList, "")
         });
       }
     }
-  }, [selectedLeadId, data.registrations]);
+  }, [selectedLeadId, data.registrations, requestedPeopleList]);
 
   const handleLeadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -235,7 +248,8 @@ export default function App() {
       resetLeadForm();
     } catch (err) {
       console.error("Submit error details:", err);
-      showToast("Could not submit lead details. Please inspect constraints and connection.", "error");
+      const message = err instanceof Error ? err.message : "Could not submit lead details. Please inspect constraints and connection.";
+      showToast(message, "error");
     }
   };
 
@@ -698,16 +712,6 @@ export default function App() {
                 onRecordSaved={(savedRecord) => {
                     fetchData();
                   if (savedRecord && savedRecord.type === "registration") {
-                    const findOptionMatch = (value: string | undefined, list: string[], defaultValue?: string): string => {
-                      if (!value) return defaultValue !== undefined ? defaultValue : list[0];
-                      const cleanedVal = value.trim().toUpperCase().replace(/\s*\+\s*/g, '+').replace(/\s+/g, '');
-                      const found = list.find(opt => {
-                        const cleanedOpt = opt.trim().toUpperCase().replace(/\s*\+\s*/g, '+').replace(/\s+/g, '');
-                        return cleanedOpt === cleanedVal || cleanedOpt.startsWith(cleanedVal) || cleanedOpt.includes(cleanedVal) || cleanedVal.includes(cleanedOpt);
-                      });
-                      return found || defaultValue || list[0];
-                    };
-
                     setLeadForm({
                       customerName: savedRecord.customerName || "",
                       contactName: savedRecord.contactName || "",
