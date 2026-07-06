@@ -5,6 +5,7 @@ import type { AuthUser } from "../auth/users";
 import { saveLocalSalesplusEntry } from "./salesplusService";
 import { syncLeadEditCustomer, syncRegistrationCustomer } from "./customerService";
 import { normalizeLeadPayload, normalizeServiceTicketPayload } from "../utils/validators";
+import { normalizeLocationName } from "../utils/location";
 
 export interface ForcedServiceRequestFields {
   customerName: string;
@@ -212,6 +213,7 @@ export async function saveForcedServiceRequestFields(
   }
   let customerId = matchedCustomer?.id ? Number(matchedCustomer.id) : 0;
   let customerCreated = false;
+  fields.location = normalizeLocationName(fields.location);
   const region = resolveRegionName(fields.location) || fields.location;
 
   if (!matchedCustomer) {
@@ -320,6 +322,7 @@ export async function createLeadRegistration(body: any, authUser: AuthUser) {
   const userRole = authUser.role;
   const userName = authUser.name.trim();
   const payload = normalizeLeadPayload(body);
+  payload.region = normalizeLocationName(payload.region);
 
   let reqPerson = payload.requestedPerson || "";
   if (userRole === "staff" && userName) {
@@ -384,6 +387,8 @@ export async function createServiceTicket(body: any, authUser: AuthUser) {
   const userRole = authUser.role;
   const userName = authUser.name.trim();
   const payload = normalizeServiceTicketPayload(body);
+  payload.location = normalizeLocationName(payload.location);
+  payload.region = normalizeLocationName(payload.region);
 
   let reqPerson = payload.requestedPerson || "";
   if (userRole === "staff" && userName) {
@@ -415,6 +420,7 @@ export async function createServiceTicket(body: any, authUser: AuthUser) {
 
 export async function updateLeadRegistration(recordId: number, body: any) {
   const payload = normalizeLeadPayload(body);
+  payload.region = normalizeLocationName(payload.region);
   const custName = payload.customerName;
 
   await db.update(serviceRequests).set({
@@ -461,6 +467,8 @@ export async function deleteLeadRegistration(recordId: number) {
 
 export async function updateServiceTicket(recordId: number, body: any) {
   const payload = normalizeServiceTicketPayload(body);
+  payload.location = normalizeLocationName(payload.location);
+  payload.region = normalizeLocationName(payload.region);
   await db.update(serviceRequests).set({
     customerName: payload.customerName,
     issueDescription: payload.description,
@@ -470,7 +478,8 @@ export async function updateServiceTicket(recordId: number, body: any) {
     paymentStatus: payload.payment,
     amount: payload.amount,
     salesPerson: payload.assignee,
-    location: payload.location
+    location: payload.location,
+    region: payload.location || payload.region
   }).where(eq(serviceRequests.id, recordId));
 }
 

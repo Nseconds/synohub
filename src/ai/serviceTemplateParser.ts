@@ -1,4 +1,5 @@
 import type { ForcedServiceRequestFields } from "../services/serviceRequestService";
+import { normalizeLocationName } from "../utils/location";
 
 export function extractTemplateField(input: string, labels: string[]): string {
   const templateFieldLabels = [
@@ -62,10 +63,12 @@ export function cleanCustomerTemplateName(value: string): string {
   const raw = nonEmailParts.length > 1
     ? nonEmailParts[nonEmailParts.length - 1]
     : (nonEmailParts[0] || parts[0] || value);
-  const cleaned = cleanTemplateValue(raw)
-    .replace(/\bdetails\b$/i, "")
+  let cleaned = cleanTemplateValue(raw)
     .replace(/\b(services?|requirement|payment|customer)\s+details\b/i, "")
     .trim();
+  if (!/^details$/i.test(cleaned)) {
+    cleaned = cleaned.replace(/\s+\bdetails\b$/i, "").trim();
+  }
   if (/^al\s+ameen\s*sport$/i.test(cleaned.replace(/\s+/g, " "))) return "Al Ameen Sport";
   return cleaned;
 }
@@ -181,15 +184,7 @@ function extractPhone(text: string): string | null {
 }
 
 function canonicalizeLocation(value: string): string {
-  const cleaned = cleanTemplateValue(value);
-  if (!cleaned) return "";
-  return cleaned.replace(/\b(dubai|abu dhabi|sharjah|ajman|fujairah|ras al khaimah|umm al quwain)\b/gi, (match) => {
-    return match
-      .toLowerCase()
-      .split(" ")
-      .map(part => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(" ");
-  });
+  return normalizeLocationName(cleanTemplateValue(value));
 }
 
 function canonicalizeImplementationType(value: string): string {

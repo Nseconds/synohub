@@ -5,33 +5,16 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { db } from "../db";
 import { initDB } from "../db/init";
-import { customers, serviceRequests, messages } from "../db/schema";
-import { eq, like, or, desc, and } from "drizzle-orm";
+import { customers, serviceRequests } from "../db/schema";
+import { eq, like, or, desc } from "drizzle-orm";
 import axios from "axios";
-import crypto from "crypto";
-import fs from "fs";
 import env from "../shared/validation/env";
-import { CustomerSchema } from "../shared/validation/customer";
-import { QuerySchema } from "../shared/validation/query";
 
-import { getAuthUser, requireAuth, requireRoles } from "../auth/middleware";
-import { issueToken } from "../auth/jwt";
-import { allowedStaff, normalizeUserName, staffRoster, type AuthUser, type UserRole } from "../auth/users";
+import { getAuthUser, requireAuth } from "../auth/middleware";
 import { chatHistoryPredicates, resolveChatIdentity } from "../auth/permissions";
-import {
-  createLeadRegistration,
-  createServiceTicket,
-  deleteLeadRegistration,
-  deleteServiceTicket,
-  updateLeadRegistration,
-  updateServiceTicket,
-} from "../services/serviceRequestService";
-import { getDashboardData } from "../services/dashboardService";
 import { getChatMessagesByPredicate, getRecentChatMessages, saveChatMessage } from "../services/messageService";
 import {
-  cleanEnvVar,
   cleanedGeminiKey,
-  cleanedOpenRouterKey,
   cloudProviderLabel,
   extraLlmModel,
   extraLlmReasoning,
@@ -71,14 +54,12 @@ import {
   validateQueryIntent,
   type DetectedQueryIntent,
   type QueryProviderResult,
-  type SafeQueryIntent,
 } from "../ai/queryIntentDetector";
 import {
   formatProviderError,
   getProviderLabel,
   isOpenRouterTemporaryAvailabilityError,
   runGeminiIntentProvider,
-  runIntentDetectorFallback,
   runLocalIntentProvider,
   runNvidiaIntentProvider,
   runOpenRouterIntentProvider,
@@ -105,6 +86,11 @@ import {
 import {
   type SafeQueryAiMode,
 } from "../ai/chatService";
+import { registerAnalyticsRoutes } from "./analyticsRoutes";
+import { registerAuthRoutes } from "./authRoutes";
+import { registerCustomerRoutes } from "./customerRoutes";
+import { registerDashboardRoutes } from "./dashboardRoutes";
+import { registerServiceRequestRoutes } from "./serviceRequestRoutes";
 
 // Load prompts
 let prompts = loadPrompts();
@@ -161,10 +147,6 @@ function isIdentityLookupMessage(input: string): boolean {
   const normalized = normalizeChatLookupText(input);
   return /\b(who\s+am\s+i|who\s+i\s+am|what\s+is\s+my\s+(name|role)|my\s+login|my\s+account)\b/.test(normalized);
 }
-
-const configuredAdminPassword = cleanEnvVar(process.env.ADMIN_PASSWORD) || "admin";
-const configuredStaffPassword = cleanEnvVar(process.env.STAFF_PASSWORD) || "staff123";
-const devAdminPassword = null;
 
 function cleanRecordDescription(value: unknown): string {
   return String(value || "No description")
@@ -253,29 +235,6 @@ function formatCompareProviderAnswer(
   return `${providerLabel}\n${meta}\n\n${provider.answer || "No answer produced."}`;
 }
 
-function formatCompareWinnerReason(
-  winner: QueryProviderName,
-  providerChoice: { mismatch: boolean },
-  providers: Record<QueryProviderName, QueryProviderResult>
-): string {
-  const geminiFailed = Boolean(providers.gemini.error);
-  const localFailed = Boolean(providers.local.error);
-
-  if (geminiFailed && !localFailed && winner === "local") {
-    return ` (${cloudProviderLabel} unavailable, using Local LLM)`;
-  }
-  if (localFailed && !geminiFailed && winner === "gemini") {
-    return ` (Local LLM unavailable, using ${cloudProviderLabel})`;
-  }
-  if (geminiFailed && localFailed) {
-    return " (both providers failed)";
-  }
-  if (providerChoice.mismatch) {
-    return " (intent or params mismatch)";
-  }
-  return "";
-}
-
 export async function startServer() {
   const app = express();
   const PORT = env.PORT;
@@ -296,250 +255,11 @@ export async function startServer() {
     res.json({ status: "ok" });
   });
 
-  // Login handler
-  app.post("/api/login", (req, res) => {
-    const { username, password } = req.body;
-    if (!username) {
-      return res.status(400).json({ error: "Username is required" });
-    }
-
-    const normalizedUser = username.trim().toLowerCase();
-    
-    // System Admin login check
-    if (normalizedUser === "admin" && (password === "admin" || password === configuredAdminPassword)) {
-      const authUser = { sub: "admin", role: "admin" as const, name: "Administrator" };
-      return res.json({
-        success: true,
-        token: issueToken(authUser),
-        role: authUser.role,
-        name: authUser.name
-      });
-    }
-
-    if (allowedStaff.includes(normalizedUser)) {
-      // Allow 'staff123', the custom STAFF_PASSWORD, or the employee's own name in lowercase
-      const allowedPasswords = ["staff123", configuredStaffPassword, normalizedUser];
-      if (allowedPasswords.includes(password)) {
-        const properName = staffRoster.find(p => p.toLowerCase() === normalizedUser) || username;
-        const authUser = { sub: `staff:${normalizedUser}`, role: "staff" as const, name: properName };
-        return res.json({
-          success: true,
-          token: issueToken(authUser),
-          role: authUser.role,
-          name: authUser.name
-        });
-      }
-    }
-
-    return res.status(401).json({ error: "Incorrect username or password. Check credentials roster." });
-  });
-
-  app.post("/api/guest-session", (_req, res) => {
-    const guestId = crypto.randomBytes(8).toString("hex");
-    const authUser = {
-      sub: `guest:${guestId}`,
-      role: "guest" as const,
-      name: `Guest-${guestId}`,
-    };
-    res.json({
-      success: true,
-      token: issueToken(authUser),
-      role: authUser.role,
-      name: authUser.name
-    });
-  });
-
-  // Get all dashboard data
-  app.get("/api/data", requireAuth, async (req, res) => {
-    try {
-      res.json(await getDashboardData(getAuthUser(req)));
-    } catch (error) {
-      console.error("Dashboard data fetch failed:", error);
-      res.status(500).json({ 
-        error: (error as Error).message,
-        details: "Check database connection and table existence. Ensure initDB completed successfully.",
-        connectionConfig: {
-          host: process.env.DB_HOST || 'localhost (127.0.0.1)',
-          port: process.env.DB_PORT || '3306/3307',
-          user: process.env.DB_USER || 'root',
-          database: process.env.DB_NAME || 'testdb',
-          socketPath: process.env.DB_SOCKET || 'not provided',
-          passwordProvided: !!process.env.DB_PASSWORD
-        }
-      });
-    }
-  });
-
-  // Create new registration
-  app.post("/api/leads/new", requireAuth, async (req, res) => {
-    try {
-      const result = await createLeadRegistration(req.body, getAuthUser(req));
-      res.json({ success: true, id: result.insertId, message: 'Registration created' });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // Create service request
-  app.post("/api/services", requireAuth, async (req, res) => {
-    try {
-      const result = await createServiceTicket(req.body, getAuthUser(req));
-      res.json({ success: true, id: result.insertId, ticket_id: result.insertId ? ("TKT-" + result.insertId) : "", message: 'Service ticket created' });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // Edit/Update lead registration
-  app.put("/api/leads/:id", requireAuth, async (req, res) => {
-    try {
-      const { id } = req.params;
-      const authUser = getAuthUser(req);
-      const userRole = authUser.role;
-
-      if (userRole === "guest") {
-        return res.status(403).json({ error: "Access Denied. Public guest users cannot update records." });
-      }
-
-      const recordId = parseInt(id);
-      if (userRole === "staff") {
-        return res.status(403).json({ error: "Access Denied: Staff users can create and view records but cannot modify or delete existing records. Please contact a Manager or Administrator." });
-      }
-
-      await updateLeadRegistration(recordId, req.body);
-      res.json({ success: true, message: "Lead registration updated and customer synchronized successfully" });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // Delete lead registration
-  app.delete("/api/leads/:id", requireAuth, async (req, res) => {
-    try {
-      const { id } = req.params;
-      const userRole = getAuthUser(req).role;
-      if (userRole === "staff") {
-        return res.status(403).json({ error: "Access Denied: Staff users can create and view records but cannot modify or delete existing records. Please contact a Manager or Administrator." });
-      }
-      if (userRole !== "admin") {
-        return res.status(403).json({ error: "Access Denied. Only system administrators can delete records." });
-      }
-
-      await deleteLeadRegistration(parseInt(id));
-      res.json({ success: true, message: "Lead registration deleted successfully by Admin" });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // Edit/Update service task
-  app.put("/api/services/:id", requireAuth, async (req, res) => {
-    try {
-      const { id } = req.params;
-      const userRole = getAuthUser(req).role;
-
-      if (userRole === "guest") {
-        return res.status(403).json({ error: "Access Denied. Public guest users cannot update records." });
-      }
-
-      const recordId = parseInt(id);
-      if (userRole === "staff") {
-        return res.status(403).json({ error: "Access Denied: Staff users can create and view records but cannot modify or delete existing records. Please contact a Manager or Administrator." });
-      }
-
-      await updateServiceTicket(recordId, req.body);
-      res.json({ success: true, message: "Service ticket updated successfully" });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // Delete service task
-  app.delete("/api/services/:id", requireAuth, async (req, res) => {
-    try {
-      const { id } = req.params;
-      const userRole = getAuthUser(req).role;
-      if (userRole === "staff") {
-        return res.status(403).json({ error: "Access Denied: Staff users can create and view records but cannot modify or delete existing records. Please contact a Manager or Administrator." });
-      }
-      if (userRole !== "admin") {
-        return res.status(403).json({ error: "Access Denied. Only system administrators can delete records." });
-      }
-
-      await deleteServiceTicket(parseInt(id));
-      res.json({ success: true, message: "Service ticket deleted successfully by Admin" });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // Edit/Update customer definition
-  app.put("/api/customers/:id", requireAuth, requireRoles("admin"), async (req, res) => {
-    try {
-      const { id } = req.params;
-
-      const b = CustomerSchema.parse(req.body);
-      await db.update(customers).set({
-        name: b.name,
-        contactName: b.contactName,
-        phone: b.phone,
-        email: b.email,
-        region: b.region,
-        implementationType: b.implementationType,
-        vehicleCount: b.vehicleCount || 0
-      }).where(eq(customers.id, parseInt(id)));
-      res.json({ success: true, message: "Customer account updated successfully by Admin" });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // Delete customer definition
-  app.delete("/api/customers/:id", requireAuth, requireRoles("admin"), async (req, res) => {
-    try {
-      const { id } = req.params;
-
-      await db.delete(customers).where(eq(customers.id, parseInt(id)));
-      res.json({ success: true, message: "Customer account deleted successfully by Admin" });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // Customer search
-  app.get("/api/customers", requireAuth, async (req, res) => {
-    try {
-      const authUser = getAuthUser(req);
-      const userRole = authUser.role;
-      const userName = normalizeUserName(authUser.name);
-      const { search: q } = QuerySchema.parse(req.query);
-      const rawResults = q 
-        ? await db.select().from(customers).where(or(like(customers.name, `%${q}%`), like(customers.contactName, `%${q}%`)))
-        : await db.select().from(customers);
-
-      let results = rawResults;
-      if (userRole === "guest") {
-        results = rawResults.filter(c => normalizeUserName(c.createdBy || "") === userName);
-      } else if (userRole === "staff") {
-        const rawRequests = await db.select().from(serviceRequests).orderBy(desc(serviceRequests.id)).limit(1000);
-        const allowedCustomerNames = new Set(
-          rawRequests
-            .filter(r => {
-              const salesPerson = normalizeUserName(r.salesPerson || "");
-              const reqPerson = normalizeUserName(r.requestedPerson || "");
-              const createdByVal = normalizeUserName(r.createdBy || "");
-              return salesPerson === userName || reqPerson === userName || createdByVal === userName;
-            })
-            .map(r => normalizeUserName(r.customerName || ""))
-        );
-        results = rawResults.filter(c => allowedCustomerNames.has(normalizeUserName(c.name || "")) || normalizeUserName(c.createdBy || "") === userName);
-      }
-
-      res.json({ results, total: results.length });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
+  registerAuthRoutes(app);
+  registerDashboardRoutes(app);
+  registerServiceRequestRoutes(app);
+  registerCustomerRoutes(app);
+  registerAnalyticsRoutes(app);
 
   // Safe natural-language query endpoint. This route never asks AI to generate SQL.
   app.post("/api/chat/query", requireAuth, async (req, res) => {
@@ -1523,177 +1243,6 @@ ${allServices.map((s: any) => ` * ID: ${s.id} | Created: "${s.createdAt || ''}" 
         history = await getChatMessagesByPredicate(historyPredicateFor(chatIdentity.channel));
       }
       res.json(history);
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // --- Log Ingestion & Parsing ---
-
-  app.post("/api/ingest", requireAuth, requireRoles("admin", "staff"), async (req, res) => {
-    try {
-      const { rawLog } = req.body;
-      if (!rawLog) return res.status(400).json({ error: "Missing raw log" });
-
-      // Split log into messages (simple regex for date/time pattern)
-      const messages_raw = rawLog.split(/\n(?=\d{2}\/\d{2}\/\d{4},)/g);
-      const batch = messages_raw.slice(0, 10).join("\n---\n"); // Process first 10 for demo speed
-
-      // Dynamically load prompts to ensure any manual or UI updates to prompts.json are picked up in real-time
-      let currentPrompts = { ...prompts };
-      try {
-        currentPrompts = loadPrompts();
-      } catch (err) {
-        console.error("Failed to load prompts dynamically in /api/ingest:", err);
-      }
-
-      let parsedSuccessfully = false;
-      let rawResponseContent = "";
-
-      // 1. Try Gemini first if available
-      if (genAI && cleanedGeminiKey) {
-        try {
-          console.log(`[AI Ingest] Using Gemini API with log extractor prompt: model=${geminiModel}`);
-          const startTime = Date.now();
-          const response = await genAI.models.generateContent({
-            model: geminiModel,
-            contents: "Extract records from these logs:\n" + batch,
-            config: {
-              systemInstruction: currentPrompts.log_extractor,
-              responseMimeType: "application/json"
-            }
-          });
-          console.log(`[AI Ingest] Gemini Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-          rawResponseContent = response.text;
-          parsedSuccessfully = true;
-        } catch (geminiErr) {
-          console.error("Gemini failed for log extraction, falling back to Ollama:", (geminiErr as Error).message);
-        }
-      }
-
-      // 2. Use the primary OpenRouter provider only when Gemini is not configured
-      if (!parsedSuccessfully && !cleanedGeminiKey && cleanedOpenRouterKey) {
-        try {
-          console.log(`[AI Ingest] Using ${openRouterPrimaryLabel}/OpenRouter log extractor: model=${openRouterModel}`);
-          const startTime = Date.now();
-          rawResponseContent = await runOpenRouterChatCompletion({
-            json: true,
-            maxTokens: 4000,
-            temperature: 0,
-            messages: [
-              { role: "system", content: currentPrompts.log_extractor },
-              { role: "user", content: "Extract records from these logs:\n" + batch },
-            ],
-          });
-          console.log(`[AI Ingest] ${openRouterPrimaryLabel}/OpenRouter Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-          parsedSuccessfully = true;
-        } catch (providerErr) {
-          console.error(`${openRouterPrimaryLabel}/OpenRouter failed for log extraction, falling back to Ollama:`, (providerErr as Error).message);
-        }
-      }
-
-      // 3. Fall back to Ollama if cloud providers failed or were unavailable
-      if (!parsedSuccessfully) {
-        let ollamaUrl = env.OLLAMA_URL;
-        if (!ollamaUrl.endsWith("/api/chat")) {
-          ollamaUrl = ollamaUrl.replace(/\/$/, "") + "/api/chat";
-        }
-
-        const ollamaOptions: any = {
-          num_ctx: parseInt(env.OLLAMA_NUM_CTX, 10),
-          num_thread: parseInt(env.OLLAMA_NUM_THREAD, 10),
-        };
-
-        const gpuConfig = parseInt(env.OLLAMA_NUM_GPU, 10);
-        ollamaOptions.num_gpu = gpuConfig;
-        
-        if (gpuConfig !== -1) {
-          ollamaOptions.main_gpu = 0;
-        }
-
-        const currentOllamaModel = env.OLLAMA_MODEL;
-
-        console.log(`[AI Ingest] START: model=${currentOllamaModel}, options=${JSON.stringify(ollamaOptions)}`);
-        console.log(`[AI Ingest] URL: ${ollamaUrl}`);
-        const startTime = Date.now();
-
-        const response = await axios.post(ollamaUrl, {
-          model: currentOllamaModel,
-          messages: [
-            { role: "system", content: currentPrompts.log_extractor },
-            { role: "user", content: "Extract records from these logs:\n" + batch }
-          ],
-          options: ollamaOptions,
-          keep_alive: env.OLLAMA_KEEP_ALIVE,
-          stream: false
-        }, { 
-          timeout: 300000,
-          validateStatus: () => true 
-        });
-
-        if (response.status !== 200) {
-          throw new Error(`Ollama returned status ${response.status}: ${JSON.stringify(response.data)}`);
-        }
-
-        console.log(`[AI Ingest] Success in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-        rawResponseContent = response.data.message.content;
-        parsedSuccessfully = true;
-      }
-
-      let content = rawResponseContent.replace(/```json|```/g, "").trim();
-      const extracted = JSON.parse(content);
-      res.json({ extracted });
-    } catch (error) {
-      console.error("Ingestion failed:", (error as Error).message);
-      res.status(500).json({ error: "AI Parsing failed. Check Ollama connection.", details: (error as Error).message });
-    }
-  });
-
-  // Bulk save ingested data
-  app.post("/api/ingest/save", requireAuth, requireRoles("admin"), async (req, res) => {
-    try {
-      const { records } = req.body;
-      for (const rec of records) {
-        if (rec.type === "registration") {
-          await db.insert(serviceRequests).values({
-            customerName: rec.customerName,
-            contactName: rec.contactName,
-            phone: rec.phone,
-            email: rec.email,
-            region: rec.region,
-            address: rec.address,
-            mapLink: rec.mapLink,
-            coordinates: rec.coordinates,
-            source: rec.source,
-            status: rec.status || 'New Lead',
-            implementationType: rec.implementationType,
-            salesPerson: rec.salesPerson,
-            salesType: rec.salesType,
-            requestedPerson: rec.requestedPerson,
-            comment: rec.comment,
-            projectValue: rec.projectValue,
-            priceDetails: rec.priceDetails,
-            accessories: rec.accessories,
-            newQty: rec.newQty || rec.qty || 0,
-            migrateQty: rec.migrateQty || 0,
-            tradingQty: rec.tradingQty || 0,
-            serviceQty: rec.serviceQty || 0,
-            otherQty: rec.otherQty || 0
-          });
-        } else if (rec.type === "service") {
-          await db.insert(serviceRequests).values({
-            customerName: rec.customerName,
-            issueDescription: rec.description,
-            jobStatus: rec.status || 'Pending',
-            newQty: rec.quantity || 1,
-            requestedPerson: rec.requestedPerson,
-            paymentStatus: rec.payment,
-            amount: rec.amount,
-            salesPerson: rec.assignee
-          });
-        }
-      }
-      res.json({ success: true, message: "Bulk import complete" });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
