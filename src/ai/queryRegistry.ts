@@ -73,7 +73,7 @@ interface QueryRow extends RowDataPacket {
 }
 
 const DEFAULT_LIMIT = 10;
-const MAX_LIMIT = 50;
+const MAX_LIMIT = 100;
 
 function normalizeName(value: string | undefined): string {
   return String(value || "").trim().toLowerCase();

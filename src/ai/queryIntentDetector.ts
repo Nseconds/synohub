@@ -175,7 +175,7 @@ function extractQueryLimit(text: string, fallback = 10): number {
   const match = text.toLowerCase().match(/\b(\d{1,3})\b/);
   const parsed = match ? parseInt(match[1], 10) : fallback;
   if (!Number.isFinite(parsed)) return fallback;
-  return Math.max(1, Math.min(parsed, 50));
+  return Math.max(1, Math.min(parsed, 100));
 }
 
 function extractDateRange(text: string): "today" | "this_week" | "this_month" | undefined {
